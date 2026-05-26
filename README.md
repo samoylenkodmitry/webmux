@@ -1,5 +1,13 @@
 <h1 align="center">webmux</h1>
 
+
+All terminals from all computers in a single place.
+
+https://github.com/user-attachments/assets/f6fbf494-1de4-47cb-b80e-32f76660511e
+
+
+
+
 <p align="center">
   <img src="public/icon.svg" width="84" alt="webmux">
 </p>
