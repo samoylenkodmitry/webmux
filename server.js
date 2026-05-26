@@ -40,16 +40,26 @@ const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
 const DESKTOP_TERMINAL = process.env.DESKTOP_TERMINAL || '';
 
 // How to spawn a terminal window that runs `tmux new-session -A -s <name>`.
+// DESKTOP_TERMINAL is a token the installer picks from the installed terminals.
 function desktopLaunchSpec(name) {
   const run = [TMUX_BIN, ...(TMUX_SOCKET ? ['-L', TMUX_SOCKET] : []), 'new-session', '-A', '-s', name];
-  if (DESKTOP_TERMINAL) return [DESKTOP_TERMINAL, ['-e', ...run]];
+  const cmdline = run.join(' '); // name (NAME_RE) + tmux path have no spaces/quotes to escape
+  const t = (DESKTOP_TERMINAL || '').toLowerCase();
   if (process.platform === 'darwin') {
-    // macOS apps generally can't be driven by `-e` from the CLI, so open a
-    // Terminal.app window via AppleScript. `name` is validated by NAME_RE, so
-    // there are no quotes/spaces to escape inside the script string.
-    return ['osascript', ['-e', `tell application "Terminal" to do script "${run.join(' ')}"`]];
+    // macOS GUI apps can't be driven by `-e` from the CLI; use open / AppleScript.
+    if (t === 'iterm' || t === 'iterm2')
+      return ['osascript', ['-e', `tell application "iTerm" to create window with default profile command "${cmdline}"`]];
+    if (t === 'ghostty')
+      return ['open', ['-na', 'Ghostty', '--args', '-e', ...run]];
+    if (t && t !== 'terminal' && t !== 'terminal.app')
+      return [DESKTOP_TERMINAL, ['-e', ...run]]; // some other CLI emulator
+    return ['osascript', ['-e', `tell application "Terminal" to do script "${cmdline}"`]]; // default
   }
-  return ['ghostty', ['-e', ...run]]; // Linux default
+  // Linux / other
+  if (!t) return ['ghostty', ['-e', ...run]];
+  if (t === 'gnome-terminal') return ['gnome-terminal', ['--', ...run]];
+  if (t === 'wezterm') return ['wezterm', ['start', '--', ...run]];
+  return [DESKTOP_TERMINAL, ['-e', ...run]]; // ghostty/kitty/alacritty/foot/konsole/xterm
 }
 
 // Open a real terminal window on the PC attached to the tmux session, so it is

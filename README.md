@@ -40,7 +40,7 @@ Because every session lives in tmux on the PC, nothing is lost when the phone di
 curl -fsSL https://raw.githubusercontent.com/samoylenkodmitry/webmux/main/install.sh | bash
 ```
 
-Installs a background service on `127.0.0.1:8083` (systemd user service on Linux, launchd agent on macOS). **Requires** Node ≥ 18, npm, tmux, and a C toolchain for the native PTY module (Linux: `base-devel`/`build-essential` + `python3`; macOS: Xcode Command Line Tools).
+Installs a background service on `127.0.0.1:8083` (systemd user service on Linux, launchd agent on macOS). It's **interactive**: it offers to install `tmux` if missing, and lets you choose which installed terminal **New** should open on the desktop. **Requires** Node ≥ 18, npm, and a C toolchain for the native PTY module (Linux: `base-devel`/`build-essential` + `python3`; macOS: Xcode Command Line Tools). Set `WEBMUX_NONINTERACTIVE=1` to accept defaults silently.
 
 Then expose it privately to your other devices:
 
