@@ -98,15 +98,20 @@ detect_terminals() { # echo installed terminal tokens, one per line
 # Optionally make every interactive shell join tmux, so terminals opened normally
 # (Ghostty from the dock, etc.) show up in webmux. Idempotent; opt-in.
 setup_autostart() {
-  local lifecycle="${1:-persistent}" rc had=0
+  local rc had=0
   case "${SHELL##*/}" in zsh) rc="$HOME/.zshrc" ;; bash) rc="$HOME/.bashrc" ;; *) rc="$HOME/.zshrc" ;; esac
   if grep -q 'webmux tmux autostart' "$rc" 2>/dev/null; then
     had=1
   elif grep -qE 'phone-terminal-tmux-autostart|exec tmux new-session' "$rc" 2>/dev/null; then
     warn "An existing tmux autostart is already in $rc — leaving it untouched."; return 0
   fi
-  # Self-heal: drop any older webmux block before writing the current one.
+  # Self-heal: drop any older webmux block (e.g. one with the old kill-on-detach
+  # variant) before writing the current persistent one.
   remove_block "$rc" "webmux tmux autostart"
+  # Sessions are persistent: closing the terminal leaves the session detached so
+  # you can re-attach from webmux. (A previous version offered a "kill on detach"
+  # mode via `destroy-unattached on`; that reaped sessions out from under their
+  # own terminal and is intentionally gone.)
   cat >> "$rc" <<'RC'
 
 # >>> webmux tmux autostart >>>
@@ -120,22 +125,16 @@ if command -v tmux >/dev/null 2>&1 && [ -z "${TMUX:-}" ] && [ -z "${SSH_CONNECTI
       [ -n "$__wm" ] || __wm=shell
       __wm_b=$__wm; __wm_i=2
       while tmux has-session -t "=$__wm" 2>/dev/null; do __wm="$__wm_b-$__wm_i"; __wm_i=$((__wm_i + 1)); done
-      exec tmux new-session -s "$__wm"@@TMUX_EXTRA@@
+      exec tmux new-session -s "$__wm"
       ;;
   esac
 fi
 # <<< webmux tmux autostart <<<
 RC
-  # ephemeral: kill the session when the terminal window closes (no detached
-  # leftovers cluttering the picker). persistent: keep the session for re-attach.
-  local repl=""
-  [ "$lifecycle" = ephemeral ] && repl=' \\; set-option destroy-unattached on'
-  local tmp; tmp="$(mktemp)" || return 1
-  sed "s|@@TMUX_EXTRA@@|${repl}|" "$rc" > "$tmp" && mv "$tmp" "$rc"
   if [ "$had" = 1 ]; then
-    say "Refreshed webmux tmux autostart in $rc (lifecycle: $lifecycle)"
+    say "Refreshed webmux tmux autostart in $rc"
   else
-    say "Added tmux autostart to $rc (lifecycle: $lifecycle) — open a new terminal window for it to take effect."
+    say "Added tmux autostart to $rc — open a new terminal window for it to take effect."
   fi
 }
 # Hide tmux's status bar + enable system-clipboard copy. Re-run rewrites the
@@ -209,11 +208,7 @@ fi
 
 # Offer to make all normally-opened terminals show up in webmux (auto-tmux).
 if ask_yn "Make terminals you open normally show up in webmux too (auto-start tmux in new shells)? [y/N]" N; then
-  AUTOSTART_LIFECYCLE=persistent
-  if ask_yn "  When you close that terminal window, also kill its tmux session? (n keeps it detached so you can re-attach from webmux later) [y/N]" N; then
-    AUTOSTART_LIFECYCLE=ephemeral
-  fi
-  setup_autostart "$AUTOSTART_LIFECYCLE"
+  setup_autostart
 fi
 
 # Tailscale: offer to install it for private remote access from your phone.
