@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#0d1117" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="terminal" />
+  <title>terminal</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/vendor/xterm.css" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <!-- Session picker -->
+  <section id="picker" class="view">
+    <header class="bar">
+      <h1>tmux sessions</h1>
+      <div class="bar-actions">
+        <button id="refresh" class="btn" title="Refresh">↻</button>
+        <button id="new" class="btn btn-primary">＋ New</button>
+      </div>
+    </header>
+    <ul id="sessions" class="sessions"></ul>
+    <p id="picker-empty" class="empty" hidden>No tmux sessions running. Tap “＋ New” to start one.</p>
+    <p id="picker-status" class="status"></p>
+  </section>
+
+  <!-- Terminal -->
+  <section id="terminal-view" class="view" hidden>
+    <header class="bar">
+      <button id="back" class="btn" title="Detach &amp; back">←</button>
+      <button id="term-name" class="term-name" title="Switch session"></button>
+      <span id="conn" class="conn"></span>
+      <div class="bar-actions">
+        <button id="copy" class="btn" title="Select / copy text">⧉</button>
+        <button id="paste" class="btn" title="Paste from clipboard">⎘</button>
+        <button id="kbd" class="btn" title="Toggle keyboard">⌨</button>
+        <button id="menu-btn" class="btn" title="Menu">⋯</button>
+      </div>
+    </header>
+    <div id="term" class="term"></div>
+    <div id="keys" class="keys"></div>
+
+    <!-- in-terminal session switcher -->
+    <div id="switcher" class="switcher" hidden>
+      <div class="switcher-panel" role="dialog" aria-label="Switch session">
+        <div class="switcher-head">
+          <span>Switch session</span>
+          <button id="switcher-close" class="btn" title="Close">✕</button>
+        </div>
+        <ul id="switcher-list" class="sessions"></ul>
+        <button id="switcher-new" class="btn btn-primary">＋ New session</button>
+      </div>
+    </div>
+
+    <!-- terminal menu -->
+    <div id="menu" class="sheet" hidden>
+      <div class="sheet-panel" role="dialog" aria-label="Terminal menu">
+        <div class="sheet-head">
+          <span>Terminal</span>
+          <button id="menu-close" class="btn" title="Close">✕</button>
+        </div>
+        <div class="menu-row">
+          <span class="menu-label">Font size</span>
+          <button id="font-dec" class="btn">A−</button>
+          <span id="font-val" class="menu-val">14</span>
+          <button id="font-inc" class="btn">A+</button>
+        </div>
+        <button id="menu-windows" class="btn">▦ Windows</button>
+        <button id="menu-bottom" class="btn">↓ Scroll to bottom</button>
+        <button id="menu-reconnect" class="btn">↻ Reconnect</button>
+        <button id="menu-kill" class="btn btn-danger">✕ Close (kill) session</button>
+      </div>
+    </div>
+
+    <!-- window switcher -->
+    <div id="windows" class="sheet" hidden>
+      <div class="sheet-panel" role="dialog" aria-label="Windows">
+        <div class="sheet-head">
+          <span>Windows</span>
+          <button id="windows-close" class="btn" title="Close">✕</button>
+        </div>
+        <ul id="windows-list" class="sessions"></ul>
+        <button id="windows-new" class="btn btn-primary">＋ New window</button>
+      </div>
+    </div>
+
+    <!-- reliable in-app confirm dialog (window.confirm is flaky in PWAs) -->
+    <div id="confirm" class="sheet" hidden>
+      <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <div class="sheet-head"><span id="confirm-title">Confirm</span></div>
+        <div id="confirm-msg" class="confirm-msg"></div>
+        <pre id="confirm-preview" class="confirm-preview" hidden></pre>
+        <div class="confirm-actions">
+          <button id="confirm-cancel" class="btn">Cancel</button>
+          <button id="confirm-ok" class="btn btn-primary">OK</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- copy view: terminal buffer as native, selectable text -->
+    <div id="copy-view" class="copy-view" hidden>
+      <div class="copy-head">
+        <span>Long-press to select, or</span>
+        <button id="copy-all" class="btn btn-primary">Copy all</button>
+        <button id="copy-close" class="btn">Done</button>
+      </div>
+      <textarea id="copy-text" class="copy-text" readonly inputmode="none" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+    </div>
+
+    <div id="overlay" class="overlay" hidden><span id="overlay-text"></span></div>
+  </section>
+
+  <script src="/vendor/xterm.js"></script>
+  <script src="/vendor/addon-fit.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "name": "webmux",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A tiny self-hosted web terminal for your tmux sessions, built for phones.",
+  "main": "server.js",
+  "license": "MIT",
+  "author": "samoylenkodmitry",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samoylenkodmitry/webmux.git"
+  },
+  "homepage": "https://github.com/samoylenkodmitry/webmux",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "vendor": "node scripts/vendor.mjs",
+    "prepare": "node scripts/vendor.mjs"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.0"
+  }
+}
