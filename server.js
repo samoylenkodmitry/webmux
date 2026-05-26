@@ -103,19 +103,23 @@ function prettyPath(p) {
   return p;
 }
 
+// tmux 3.6 replaces non-printable bytes (TAB, \x1f, etc.) with '_' in -F output,
+// so we use a printable multi-char delimiter that won't appear in real paths/commands.
+const FS = '<<>>';
+
 async function listSessions() {
   let out;
   try {
     // Pane vars resolve against each session's active pane, so one call is enough.
     out = await tmux([
       'list-sessions', '-F',
-      '#{session_name}\t#{session_attached}\t#{session_windows}\t#{pane_current_command}\t#{pane_current_path}',
+      `#{session_name}${FS}#{session_attached}${FS}#{session_windows}${FS}#{pane_current_command}${FS}#{pane_current_path}`,
     ]);
   } catch {
     return []; // no server running -> no sessions
   }
   return out.split('\n').filter(Boolean).map((line) => {
-    const [name, attached, windows, command, cwd] = line.split('\t');
+    const [name, attached, windows, command, cwd] = line.split(FS);
     return {
       name,
       attached: Number(attached) || 0,
@@ -139,10 +143,10 @@ async function uniqueName(base) {
 async function listWindows(name) {
   const out = await tmux([
     'list-windows', '-t', `=${name}`, '-F',
-    '#{window_index}\t#{window_name}\t#{window_active}\t#{pane_current_command}',
+    `#{window_index}${FS}#{window_name}${FS}#{window_active}${FS}#{pane_current_command}`,
   ]);
   return out.split('\n').filter(Boolean).map((line) => {
-    const [index, wname, active, command] = line.split('\t');
+    const [index, wname, active, command] = line.split(FS);
     return {
       index: Number(index),
       name: wname || '',
@@ -154,8 +158,8 @@ async function listWindows(name) {
 
 // One session's live command + directory (for the dynamic browser title).
 async function sessionInfo(name) {
-  const out = await tmux(['display-message', '-p', '-t', `=${name}:`, '#{pane_current_command}\t#{pane_current_path}']);
-  const [command, dir] = out.trim().split('\t');
+  const out = await tmux(['display-message', '-p', '-t', `=${name}:`, `#{pane_current_command}${FS}#{pane_current_path}`]);
+  const [command, dir] = out.trim().split(FS);
   return { name, command: command || '', dir: dir || '', path: prettyPath(dir || '') };
 }
 
@@ -197,11 +201,11 @@ function recordRecent(dir, command) {
 async function sampleSessions() {
   let out = '';
   try {
-    out = await tmux(['list-sessions', '-F', '#{session_name}\t#{pane_current_path}\t#{pane_current_command}']);
+    out = await tmux(['list-sessions', '-F', `#{session_name}${FS}#{pane_current_path}${FS}#{pane_current_command}`]);
   } catch { /* no server -> every tracked session has closed */ }
   const current = new Map();
   for (const line of out.split('\n').filter(Boolean)) {
-    const [name, dir, command] = line.split('\t');
+    const [name, dir, command] = line.split(FS);
     current.set(name, { dir, command });
   }
   for (const [name, info] of seen) {

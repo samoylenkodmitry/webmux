@@ -43,6 +43,18 @@ choose() { # prompt, newline-separated options -> echoes the picked option
   [ -n "$pick" ] && printf '%s\n' "$pick" || printf '%s\n' "$first"
 }
 
+# Strip a "# >>> NAME >>>" … "# <<< NAME <<<" block from a file so the
+# installer can refresh its content on re-run (older installs may have stale
+# settings inside the block).
+remove_block() {
+  local file="$1" name="$2"
+  [ -f "$file" ] || return 0
+  local tmp; tmp="$(mktemp)" || return 1
+  sed -E "/^# >>> ${name} >>>\$/,/^# <<< ${name} <<<\$/d" "$file" \
+    | awk '/./{ if(b)print""; b=0; print; next } /^$/{ b=1 }' > "$tmp"
+  mv "$tmp" "$file"
+}
+
 # `curl | bash` runs a bare shell that may lack Homebrew on PATH, so tools like
 # tmux/node wouldn't be found. Make sure the usual install dirs are visible.
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
@@ -86,11 +98,15 @@ detect_terminals() { # echo installed terminal tokens, one per line
 # Optionally make every interactive shell join tmux, so terminals opened normally
 # (Ghostty from the dock, etc.) show up in webmux. Idempotent; opt-in.
 setup_autostart() {
-  local rc
+  local rc had=0
   case "${SHELL##*/}" in zsh) rc="$HOME/.zshrc" ;; bash) rc="$HOME/.bashrc" ;; *) rc="$HOME/.zshrc" ;; esac
-  if grep -q 'webmux tmux autostart' "$rc" 2>/dev/null; then say "tmux autostart already in $rc"; return 0; fi
-  if grep -qE 'phone-terminal-tmux-autostart|exec tmux new-session' "$rc" 2>/dev/null; then
-    warn "An existing tmux autostart is already in $rc — leaving it untouched."; return 0; fi
+  if grep -q 'webmux tmux autostart' "$rc" 2>/dev/null; then
+    had=1
+  elif grep -qE 'phone-terminal-tmux-autostart|exec tmux new-session' "$rc" 2>/dev/null; then
+    warn "An existing tmux autostart is already in $rc — leaving it untouched."; return 0
+  fi
+  # Self-heal: drop any older webmux block before writing the current one.
+  remove_block "$rc" "webmux tmux autostart"
   cat >> "$rc" <<'RC'
 
 # >>> webmux tmux autostart >>>
@@ -110,26 +126,34 @@ if command -v tmux >/dev/null 2>&1 && [ -z "${TMUX:-}" ] && [ -z "${SSH_CONNECTI
 fi
 # <<< webmux tmux autostart <<<
 RC
-  say "Added tmux autostart to $rc — open a new terminal window for it to take effect."
-}
-# Hide tmux's status bar + enable mouse/touch scrolling (webmux relies on mouse).
-setup_tmux_tweaks() {
-  local conf="$HOME/.tmux.conf"
-  if grep -q 'webmux tmux tweaks' "$conf" 2>/dev/null; then
-    say "tmux tweaks already in $conf"
+  if [ "$had" = 1 ]; then
+    say "Refreshed webmux tmux autostart in $rc"
   else
-    cat >> "$conf" <<'RC'
+    say "Added tmux autostart to $rc — open a new terminal window for it to take effect."
+  fi
+}
+# Hide tmux's status bar + enable system-clipboard copy. Re-run rewrites the
+# block so older settings (e.g. the previous `mouse on`) are dropped.
+setup_tmux_tweaks() {
+  local conf="$HOME/.tmux.conf" had=0
+  grep -q 'webmux tmux tweaks' "$conf" 2>/dev/null && had=1
+  remove_block "$conf" "webmux tmux tweaks"
+  cat >> "$conf" <<'RC'
 
 # >>> webmux tmux tweaks >>>
 set -g status off        # hide tmux's status bar (clean terminal)
 set -g set-clipboard on  # let copy reach the system clipboard
 # <<< webmux tmux tweaks <<<
 RC
+  if [ "$had" = 1 ]; then
+    say "Refreshed webmux tmux tweaks in $conf"
+  else
     say "Added webmux tmux tweaks to $conf"
   fi
-  # Apply to a running server immediately (new + existing sessions).
+  # Apply to the running server — and revert prior installer's `mouse on`.
   tmux set -g status off       2>/dev/null || true
   tmux set -g set-clipboard on 2>/dev/null || true
+  tmux set -g mouse  off       2>/dev/null || true
 }
 install_tailscale() {
   case "$(uname -s)" in
