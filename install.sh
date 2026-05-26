@@ -54,6 +54,7 @@ resolve_tmux() {
       [ -x "$c" ] && { TMUX_BIN="$c"; break; }
     done
   fi
+  return 0  # never fail (a failed probe must not trip `set -e` and skip prompts)
 }
 install_tmux() {
   case "$(uname -s)" in
