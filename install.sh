@@ -15,6 +15,10 @@ say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# `curl | bash` runs a bare shell that may lack Homebrew on PATH, so tools like
+# tmux/node wouldn't be found. Make sure the usual install dirs are visible.
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
+
 # --- locate or fetch the source ------------------------------------------
 SRC=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
@@ -44,6 +48,17 @@ say "Installing dependencies (builds node-pty, vendors xterm.js)…"
 npm install --no-fund --no-audit
 NODE_BIN="$(command -v node)"
 TMUX_BIN="$(command -v tmux || true)"
+# Fall back to probing common locations (Homebrew etc.) if PATH still missed it.
+if [ -z "$TMUX_BIN" ]; then
+  for c in /opt/homebrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux /home/linuxbrew/.linuxbrew/bin/tmux; do
+    [ -x "$c" ] && { TMUX_BIN="$c"; break; }
+  done
+fi
+if [ -z "$TMUX_BIN" ]; then
+  warn "tmux not found — webmux needs it at runtime."
+  warn "  macOS: brew install tmux   •   Debian/Ubuntu: sudo apt install tmux   •   Arch: sudo pacman -S tmux"
+  warn "  Then re-run this installer."
+fi
 
 # A service (systemd/launchd) starts with a minimal PATH that often misses
 # Homebrew (/opt/homebrew/bin) — where tmux/node/ghostty live. Bake a good PATH
