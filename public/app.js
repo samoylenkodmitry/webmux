@@ -96,42 +96,93 @@ async function loadSessions() {
     pickerStatus.textContent = 'Failed to load sessions: ' + e.message;
   }
   loadRecents();
-  loadShareUrl();
+  loadMachines();
 }
 
-async function loadShareUrl() {
-  const share = $('share'), urlEl = $('share-url');
-  const peersEl = $('peers'), peersListEl = $('peers-list');
-  if (!share || !urlEl) return;
-  try {
-    const res = await fetch('/api/tailnet', { cache: 'no-store' });
-    const { self, peers } = await res.json();
-    if (self && self.url) {
-      urlEl.href = self.url;
-      urlEl.textContent = self.url;
-      share.hidden = false;
-    } else {
-      share.hidden = true;
-    }
-    if (peersListEl && peersEl) {
-      peersListEl.innerHTML = '';
-      const list = Array.isArray(peers) ? peers : [];
-      for (const p of list) {
-        const a = document.createElement('a');
-        a.className = 'peer-chip';
-        a.href = p.url;
-        a.target = '_blank';
-        a.rel = 'noopener';
-        a.title = p.dns;
-        a.textContent = p.name;
-        peersListEl.append(a);
-      }
-      peersEl.hidden = list.length === 0;
-    }
-  } catch {
-    share.hidden = true;
-    if (peersEl) peersEl.hidden = true;
+// A single row of webmux instances on the tailnet: this machine (marked) + peers.
+// Tapping a peer switches to it in the SAME tab (no new tab). If a peer can't be
+// reached from this device (no MagicDNS), tapping shows an /etc/hosts hint.
+async function loadMachines() {
+  const wrap = $('machines'), row = $('machines-row'), hint = $('machine-hint');
+  if (!wrap) return;
+  let data;
+  try { data = await (await fetch('/api/tailnet', { cache: 'no-store' })).json(); }
+  catch { wrap.hidden = true; return; }
+  const peers = Array.isArray(data.peers) ? data.peers : [];
+  if (!data.enabled || (!data.self && !peers.length)) { wrap.hidden = true; return; }
+  row.innerHTML = '';
+  hint.hidden = true;
+  hint.innerHTML = '';
+
+  if (data.self && data.self.url) {
+    const me = document.createElement('span');
+    me.className = 'machine current';
+    me.textContent = (data.self.dns || '').split('.')[0] || 'this';
+    const copy = document.createElement('button');
+    copy.className = 'machine-copy';
+    copy.title = 'Copy this machine’s share URL';
+    copy.textContent = '⧉';
+    copy.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navigator.clipboard?.writeText(data.self.url)
+        .then(() => { copy.textContent = '✓'; setTimeout(() => { copy.textContent = '⧉'; }, 1000); })
+        .catch(() => {});
+    });
+    me.append(copy);
+    row.append(me);
   }
+
+  for (const p of peers) {
+    const a = document.createElement('a');
+    a.className = 'machine';
+    a.href = p.url;                 // same-tab navigation (no target=_blank)
+    a.textContent = p.name || p.dns;
+    a.title = p.dns;
+    a.addEventListener('click', (e) => {
+      if (a.dataset.unreachable === '1') { e.preventDefault(); showMachineHint(p); }
+    });
+    row.append(a);
+    // Probe from THIS device; if unreachable, mark it and offer the hint.
+    probeReachable(p.url).then((ok) => {
+      if (!ok) { a.classList.add('unreachable'); a.dataset.unreachable = '1'; }
+    });
+  }
+  wrap.hidden = false;
+}
+
+// Reachable from the browser? no-cors fetch resolves (opaque) if the host
+// answers, rejects on DNS/connection failure. Used to decide whether a peer
+// link will open on this device.
+function probeReachable(url) {
+  return new Promise((resolve) => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => { ctrl.abort(); resolve(false); }, 3000);
+    fetch(url, { mode: 'no-cors', signal: ctrl.signal })
+      .then(() => { clearTimeout(t); resolve(true); })
+      .catch(() => { clearTimeout(t); resolve(false); });
+  });
+}
+
+function showMachineHint(p) {
+  const hint = $('machine-hint');
+  const cmd = `echo '${p.ip} ${p.dns}' | sudo tee -a /etc/hosts`;
+  hint.innerHTML = '';
+  const msg = document.createElement('div');
+  msg.className = 'hint-msg';
+  msg.textContent = `“${p.name || p.dns}” won’t open from this device (Tailscale MagicDNS not resolving here). On this device, add it to /etc/hosts:`;
+  const code = document.createElement('code');
+  code.className = 'hint-cmd';
+  code.textContent = cmd;
+  const copy = document.createElement('button');
+  copy.className = 'btn';
+  copy.textContent = 'Copy command';
+  copy.addEventListener('click', () => {
+    navigator.clipboard?.writeText(cmd)
+      .then(() => { copy.textContent = 'Copied ✓'; setTimeout(() => { copy.textContent = 'Copy command'; }, 1300); })
+      .catch(() => {});
+  });
+  hint.append(msg, code, copy);
+  hint.hidden = false;
 }
 
 // If there are no sessions, distinguish "nothing running" from "tmux not found".
@@ -217,14 +268,6 @@ function renderSessions(sessions) {
 
 $('refresh').addEventListener('click', loadSessions);
 $('new').addEventListener('click', () => openSession('new'));
-$('share-copy').addEventListener('click', async (e) => {
-  const btn = e.currentTarget, url = $('share-url').textContent;
-  if (!url) return;
-  const prev = btn.textContent;
-  try { await navigator.clipboard.writeText(url); btn.textContent = '✓'; }
-  catch { btn.textContent = '?'; }
-  setTimeout(() => { btn.textContent = prev; }, 1100);
-});
 
 // =====================  Terminal  ========================================
 

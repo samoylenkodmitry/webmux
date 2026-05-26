@@ -126,7 +126,7 @@ async function tailscalePeers() {
         });
       const probes = peers.map(async (p) => {
         const health = await probeWebmuxHealth(p.ip, p.dns, 2500);
-        return health ? { name: p.name, dns: p.dns, url: p.url } : null;
+        return health ? { name: p.name, dns: p.dns, ip: p.ip, url: p.url } : null;
       });
       return (await Promise.all(probes)).filter(Boolean);
     } catch {

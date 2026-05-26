@@ -58,37 +58,39 @@ html, body {
 .picker-body .sessions { flex: none; overflow: visible; }
 .section-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; padding: 10px 14px 4px; }
 
-/* Share (Tailscale) panel */
-.share {
-  display: flex; align-items: center; gap: 8px;
-  margin: 8px; padding: 8px 12px;
-  background: var(--bar); border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 13px;
-}
-.share-label { color: var(--muted); flex: none; }
-.share-url { color: var(--accent); text-decoration: none; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.share-url:hover { text-decoration: underline; }
-.share .btn { padding: 4px 8px; }
-
-/* Tailnet peers (other webmux instances) */
-.peers {
-  display: flex; align-items: center; gap: 8px;
-  margin: 0 8px 8px; padding: 8px 12px;
-  background: var(--bar); border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 13px;
-}
-.peers-list { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
-.peer-chip {
+/* Machines row (this PC + tailnet peers, single scrollable row) */
+.machines { margin: 8px; }
+.machines-row { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
+.machines-row::-webkit-scrollbar { display: none; }
+.machine {
+  flex: none;
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 4px 10px; border-radius: 999px;
-  background: var(--bg); border: 1px solid var(--border);
-  color: var(--accent); text-decoration: none;
-  font-size: 12px;
+  padding: 6px 12px; border-radius: 999px;
+  background: var(--bar); border: 1px solid var(--border);
+  color: var(--fg); text-decoration: none;
+  font-size: 13px; white-space: nowrap; cursor: pointer;
 }
-.peer-chip:hover { border-color: var(--accent); }
-.peer-chip::before { content: "●"; color: #3fb950; font-size: 10px; }
+.machine::before { content: "●"; color: #3fb950; font-size: 10px; }
+.machine:hover { border-color: var(--accent); }
+.machine.current { border-color: var(--accent); color: var(--accent); cursor: default; }
+.machine.unreachable { color: var(--muted); border-style: dashed; }
+.machine.unreachable::before { color: var(--muted); }
+.machine-copy {
+  appearance: none; background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: 13px; padding: 0 2px; line-height: 1;
+}
+.machine-hint {
+  margin-top: 8px; padding: 10px 12px;
+  background: var(--bar); border: 1px solid var(--border); border-radius: 8px;
+  font-size: 13px; color: var(--muted);
+}
+.machine-hint .hint-msg { margin-bottom: 6px; }
+.machine-hint .hint-cmd {
+  display: block; padding: 8px; margin-bottom: 6px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; white-space: pre-wrap; word-break: break-all; -webkit-user-select: all; user-select: all;
+}
 .sessions { list-style: none; margin: 0; padding: 8px; overflow-y: auto; flex: 1; }
 .session {
   display: flex;

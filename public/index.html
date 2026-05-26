@@ -27,14 +27,9 @@
       </div>
     </header>
     <div class="picker-body">
-      <div id="share" class="share" hidden>
-        <span class="share-label">share via Tailscale</span>
-        <a id="share-url" class="share-url" target="_blank" rel="noopener"></a>
-        <button id="share-copy" class="btn" title="Copy URL">⧉</button>
-      </div>
-      <div id="peers" class="peers" hidden>
-        <span class="share-label">other instances</span>
-        <div id="peers-list" class="peers-list"></div>
+      <div id="machines" class="machines" hidden>
+        <div id="machines-row" class="machines-row"></div>
+        <div id="machine-hint" class="machine-hint" hidden></div>
       </div>
       <ul id="sessions" class="sessions"></ul>
       <p id="picker-empty" class="empty" hidden>No tmux sessions running. Tap “＋ New” to start one.</p>
