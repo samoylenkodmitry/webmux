@@ -100,6 +100,8 @@ if command -v tmux >/dev/null 2>&1 && [ -z "${TMUX:-}" ] && [ -z "${SSH_CONNECTI
   case "$-" in
     *i*)
       __wm=$(basename "$PWD"); [ "$PWD" = "$HOME" ] && __wm=home
+      __wm=$(printf '%s' "$__wm" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_-' '-' | tr -s '-' | sed -e 's/^[-_]*//' -e 's/[-_]*$//')
+      [ -n "$__wm" ] || __wm=shell
       __wm_b=$__wm; __wm_i=2
       while tmux has-session -t "=$__wm" 2>/dev/null; do __wm="$__wm_b-$__wm_i"; __wm_i=$((__wm_i + 1)); done
       exec tmux new-session -s "$__wm"
@@ -109,6 +111,36 @@ fi
 # <<< webmux tmux autostart <<<
 RC
   say "Added tmux autostart to $rc — open a new terminal window for it to take effect."
+}
+# Hide tmux's status bar + enable mouse/touch scrolling (webmux relies on mouse).
+setup_tmux_tweaks() {
+  local conf="$HOME/.tmux.conf"
+  if grep -q 'webmux tmux tweaks' "$conf" 2>/dev/null; then
+    say "tmux tweaks already in $conf"
+  else
+    cat >> "$conf" <<'RC'
+
+# >>> webmux tmux tweaks >>>
+set -g status off        # hide tmux's status bar (clean terminal)
+set -g mouse on          # mouse / touch scrolling (webmux relies on this)
+set -g set-clipboard on  # let copy reach the system clipboard
+# <<< webmux tmux tweaks <<<
+RC
+    say "Added webmux tmux tweaks to $conf"
+  fi
+  # Apply to a running server immediately (new + existing sessions).
+  tmux set -g status off       2>/dev/null || true
+  tmux set -g mouse on         2>/dev/null || true
+  tmux set -g set-clipboard on 2>/dev/null || true
+}
+install_tailscale() {
+  case "$(uname -s)" in
+    Darwin)
+      command -v brew >/dev/null 2>&1 || { warn "Install Homebrew or get Tailscale at https://tailscale.com/download"; return 1; }
+      brew install --cask tailscale ;;
+    Linux) curl -fsSL https://tailscale.com/install.sh | sh ;;
+    *) warn "See https://tailscale.com/download"; return 1 ;;
+  esac
 }
 
 # --- locate or fetch the source ------------------------------------------
@@ -134,6 +166,11 @@ if [ -z "$TMUX_BIN" ]; then
 fi
 [ -z "$TMUX_BIN" ] && warn "Continuing without tmux — webmux won't work until it's installed; re-run this installer afterwards."
 
+# tmux look: offer to hide the status bar + enable mouse/touch scrolling
+if [ -n "$TMUX_BIN" ] && ask_yn "Customize tmux to hide its status bar and enable mouse scrolling (recommended)? [y/N]" N; then
+  setup_tmux_tweaks
+fi
+
 # desktop terminal: let the user pick which installed one to open sessions in
 TERMLIST="$(detect_terminals)"
 DESKTOP_TERMINAL_CHOICE=""
@@ -145,6 +182,17 @@ fi
 # Offer to make all normally-opened terminals show up in webmux (auto-tmux).
 if ask_yn "Make terminals you open normally show up in webmux too (auto-start tmux in new shells)? [y/N]" N; then
   setup_autostart
+fi
+
+# Tailscale: offer to install it for private remote access from your phone.
+if ! command -v tailscale >/dev/null 2>&1 && [ ! -d /Applications/Tailscale.app ]; then
+  if ask_yn "Install Tailscale for private access from your phone? [y/N]" N; then
+    if install_tailscale; then
+      say "Tailscale installed. Log in (open the app, or 'tailscale up'), then: tailscale serve --bg $PORT"
+    else
+      warn "Tailscale install didn't complete — see https://tailscale.com/download"
+    fi
+  fi
 fi
 
 if [ -n "$SRC" ]; then

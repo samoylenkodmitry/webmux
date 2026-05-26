@@ -82,9 +82,12 @@ const HOME = process.env.HOME || '';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, 'public');
 
-// tmux session names we are willing to touch. node-pty spawns tmux with an arg
-// array (no shell), so this is belt-and-suspenders, not the only defense.
-const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+// Validation for session names. Real tmux names can contain spaces and unicode
+// (and tmux maps ':' / '.' to '_' itself), so the old strict regex wrongly
+// rejected sessions that the picker had listed ("session not found"). Names are
+// always passed to tmux as an argv element (never a shell), so the only genuine
+// hazard is control characters; existence is checked separately via has-session.
+const NAME_RE = /^[^\x00-\x1f\x7f]{1,128}$/;
 
 // --- tmux helpers ----------------------------------------------------------
 
