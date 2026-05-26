@@ -73,6 +73,44 @@ async function runTailscale(args) {
   return (await execFileP(bin, args, { encoding: 'utf8' })).stdout;
 }
 
+// Cached peer probe — discovering peers means an HTTPS round-trip to every
+// online tailnet node, so we cache the result for a few seconds rather than
+// hammering on every picker refresh.
+const PEER_CACHE_MS = 10_000;
+let _peersCachePromise = null;
+let _peersCacheStamp = 0;
+async function tailscalePeers() {
+  const now = Date.now();
+  if (_peersCachePromise && now - _peersCacheStamp < PEER_CACHE_MS) return _peersCachePromise;
+  _peersCacheStamp = now;
+  _peersCachePromise = (async () => {
+    try {
+      const status = JSON.parse(await runTailscale(['status', '--json']));
+      const peers = Object.values(status.Peer || {})
+        .filter((p) => p.Online && p.DNSName)
+        .map((p) => ({ name: p.HostName || p.DNSName, dns: p.DNSName.replace(/\.$/, '') }));
+      const probes = peers.map(async (p) => {
+        const url = `https://${p.dns}/`;
+        try {
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 2000);
+          const res = await fetch(`${url}api/health`, { signal: ctrl.signal });
+          clearTimeout(t);
+          if (!res.ok) return null;
+          const body = await res.json();
+          // Distinguish a webmux instance from any other HTTPS service on /api/health.
+          if (!body || typeof body !== 'object' || !('tmuxBin' in body)) return null;
+          return { ...p, url };
+        } catch { return null; }
+      });
+      return (await Promise.all(probes)).filter(Boolean);
+    } catch {
+      return [];
+    }
+  })();
+  return _peersCachePromise;
+}
+
 // Best-effort lookup of this node's own tailnet HTTPS URL from `tailscale serve
 // status`. Returns { url, dns } when serve is configured for our port; null
 // otherwise (tailscale missing, not logged in, no serve config, etc.).
@@ -341,8 +379,9 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/api/tailnet') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
-    if (!TAILSCALE_ENABLED) return sendJson(res, 200, { enabled: false, self: null });
-    return sendJson(res, 200, { enabled: true, self: await tailscaleSelf() });
+    if (!TAILSCALE_ENABLED) return sendJson(res, 200, { enabled: false, self: null, peers: [] });
+    const [self, peers] = await Promise.all([tailscaleSelf(), tailscalePeers()]);
+    return sendJson(res, 200, { enabled: true, self, peers });
   }
   if (url.pathname === '/api/recents') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });

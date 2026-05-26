@@ -101,10 +101,11 @@ async function loadSessions() {
 
 async function loadShareUrl() {
   const share = $('share'), urlEl = $('share-url');
+  const peersEl = $('peers'), peersListEl = $('peers-list');
   if (!share || !urlEl) return;
   try {
     const res = await fetch('/api/tailnet', { cache: 'no-store' });
-    const { self } = await res.json();
+    const { self, peers } = await res.json();
     if (self && self.url) {
       urlEl.href = self.url;
       urlEl.textContent = self.url;
@@ -112,8 +113,24 @@ async function loadShareUrl() {
     } else {
       share.hidden = true;
     }
+    if (peersListEl && peersEl) {
+      peersListEl.innerHTML = '';
+      const list = Array.isArray(peers) ? peers : [];
+      for (const p of list) {
+        const a = document.createElement('a');
+        a.className = 'peer-chip';
+        a.href = p.url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.title = p.dns;
+        a.textContent = p.name;
+        peersListEl.append(a);
+      }
+      peersEl.hidden = list.length === 0;
+    }
   } catch {
     share.hidden = true;
+    if (peersEl) peersEl.hidden = true;
   }
 }
 
