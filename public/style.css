@@ -120,6 +120,9 @@ html, body {
 
 .empty, .status { color: var(--muted); text-align: center; padding: 16px; }
 .status { font-size: 13px; min-height: 20px; }
+.app-foot { text-align: center; padding: 4px 12px max(8px, env(safe-area-inset-bottom)); }
+.app-foot a { color: var(--muted); font-size: 12px; text-decoration: none; }
+.app-foot a:hover { color: var(--accent); }
 
 /* Terminal */
 .term-name {
