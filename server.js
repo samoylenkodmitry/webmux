@@ -39,6 +39,71 @@ const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
 // e.g. ghostty/kitty/alacritty/xterm). If unset, a per-OS default is used.
 const DESKTOP_TERMINAL = process.env.DESKTOP_TERMINAL || '';
 
+// Tailscale UI integration is opt-in via the installer; the env var also acts
+// as a hard kill-switch when users don't want webmux invoking `tailscale` at all.
+const TAILSCALE_ENABLED = process.env.WEBMUX_TAILSCALE === '1';
+
+// Path to the tailscale CLI, used for /api/tailnet. Resolved lazily so a launchd
+// service with a minimal PATH still finds it in common install locations.
+// Memoize the lookup as a single shared promise so parallel callers (status +
+// serve) don't race past one another and see a half-initialized state.
+let _tailscalePromise = null;
+function resolveTailscale() {
+  if (_tailscalePromise) return _tailscalePromise;
+  _tailscalePromise = (async () => {
+    const candidates = [
+      process.env.TAILSCALE_BIN,
+      'tailscale',
+      process.env.HOME ? `${process.env.HOME}/.local/bin/tailscale` : '',
+      '/opt/homebrew/bin/tailscale',
+      '/usr/local/bin/tailscale',
+      '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+    ].filter(Boolean);
+    for (const c of candidates) {
+      try { await execFileP(c, ['version'], { encoding: 'utf8' }); return c; }
+      catch { /* try next */ }
+    }
+    return null;
+  })();
+  return _tailscalePromise;
+}
+async function runTailscale(args) {
+  const bin = await resolveTailscale();
+  if (!bin) throw new Error('tailscale binary not found');
+  return (await execFileP(bin, args, { encoding: 'utf8' })).stdout;
+}
+
+// Best-effort lookup of this node's own tailnet HTTPS URL from `tailscale serve
+// status`. Returns { url, dns } when serve is configured for our port; null
+// otherwise (tailscale missing, not logged in, no serve config, etc.).
+async function tailscaleSelf() {
+  try {
+    const [statusOut, serveOut] = await Promise.all([
+      runTailscale(['status', '--json', '--self=true']),
+      runTailscale(['serve', 'status', '--json']),
+    ]);
+    const status = JSON.parse(statusOut);
+    const serve = JSON.parse(serveOut);
+    const dns = ((status.Self && status.Self.DNSName) || '').replace(/\.$/, '');
+    if (!dns || !serve.Web) return null;
+    const localPort = String(PORT);
+    for (const [hostPort, cfg] of Object.entries(serve.Web)) {
+      for (const [routePath, h] of Object.entries(cfg.Handlers || {})) {
+        const proxy = h.Proxy || '';
+        const m = proxy.match(/:(\d+)(?:\/|$)/);
+        if (!m || m[1] !== localPort) continue;
+        const [host, port = '443'] = hostPort.split(':');
+        const proto = port === '80' ? 'http' : 'https';
+        const portSuffix = (port === '443' || port === '80') ? '' : `:${port}`;
+        return { dns, url: `${proto}://${host}${portSuffix}${routePath}` };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // How to spawn a terminal window that runs `tmux new-session -A -s <name>`.
 // DESKTOP_TERMINAL is a token the installer picks from the installed terminals.
 function desktopLaunchSpec(name) {
@@ -273,6 +338,11 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/sessions') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
     return sendJson(res, 200, { sessions: await listSessions() });
+  }
+  if (url.pathname === '/api/tailnet') {
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+    if (!TAILSCALE_ENABLED) return sendJson(res, 200, { enabled: false, self: null });
+    return sendJson(res, 200, { enabled: true, self: await tailscaleSelf() });
   }
   if (url.pathname === '/api/recents') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });

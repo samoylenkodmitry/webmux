@@ -57,6 +57,19 @@ html, body {
 .picker-body { flex: 1; overflow-y: auto; }
 .picker-body .sessions { flex: none; overflow: visible; }
 .section-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; padding: 10px 14px 4px; }
+
+/* Share (Tailscale) panel */
+.share {
+  display: flex; align-items: center; gap: 8px;
+  margin: 8px; padding: 8px 12px;
+  background: var(--bar); border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.share-label { color: var(--muted); flex: none; }
+.share-url { color: var(--accent); text-decoration: none; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-url:hover { text-decoration: underline; }
+.share .btn { padding: 4px 8px; }
 .sessions { list-style: none; margin: 0; padding: 8px; overflow-y: auto; flex: 1; }
 .session {
   display: flex;

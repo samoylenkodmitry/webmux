@@ -96,6 +96,25 @@ async function loadSessions() {
     pickerStatus.textContent = 'Failed to load sessions: ' + e.message;
   }
   loadRecents();
+  loadShareUrl();
+}
+
+async function loadShareUrl() {
+  const share = $('share'), urlEl = $('share-url');
+  if (!share || !urlEl) return;
+  try {
+    const res = await fetch('/api/tailnet', { cache: 'no-store' });
+    const { self } = await res.json();
+    if (self && self.url) {
+      urlEl.href = self.url;
+      urlEl.textContent = self.url;
+      share.hidden = false;
+    } else {
+      share.hidden = true;
+    }
+  } catch {
+    share.hidden = true;
+  }
 }
 
 // If there are no sessions, distinguish "nothing running" from "tmux not found".
@@ -181,6 +200,14 @@ function renderSessions(sessions) {
 
 $('refresh').addEventListener('click', loadSessions);
 $('new').addEventListener('click', () => openSession('new'));
+$('share-copy').addEventListener('click', async (e) => {
+  const btn = e.currentTarget, url = $('share-url').textContent;
+  if (!url) return;
+  const prev = btn.textContent;
+  try { await navigator.clipboard.writeText(url); btn.textContent = '✓'; }
+  catch { btn.textContent = '?'; }
+  setTimeout(() => { btn.textContent = prev; }, 1100);
+});
 
 // =====================  Terminal  ========================================
 

@@ -227,6 +227,21 @@ if ! command -v tailscale >/dev/null 2>&1 && [ ! -d /Applications/Tailscale.app 
   fi
 fi
 
+# Tailscale UI integration: when tailscale is around, offer to show this node's
+# `tailscale serve` URL in the picker (handy for opening webmux on your phone).
+# Opt-in keeps webmux from invoking `tailscale` for users who don't want it.
+WEBMUX_TAILSCALE_ENABLED=
+TAILSCALE_PRESENT=0
+for c in "$HOME/.local/bin/tailscale" /opt/homebrew/bin/tailscale /usr/local/bin/tailscale /Applications/Tailscale.app/Contents/MacOS/Tailscale; do
+  [ -x "$c" ] && TAILSCALE_PRESENT=1 && break
+done
+command -v tailscale >/dev/null 2>&1 && TAILSCALE_PRESENT=1
+if [ "$TAILSCALE_PRESENT" = 1 ]; then
+  if ask_yn "Auto-discover Tailscale URL and show it in the picker? [Y/n]" Y; then
+    WEBMUX_TAILSCALE_ENABLED=1
+  fi
+fi
+
 if [ -n "$SRC" ]; then
   DIR="$SRC"; say "Using checkout at $DIR"
 else
@@ -263,6 +278,11 @@ if [ -n "$DESKTOP_TERMINAL_CHOICE" ]; then
   DT_SYSTEMD="Environment=DESKTOP_TERMINAL=$DESKTOP_TERMINAL_CHOICE"
   DT_PLIST="    <key>DESKTOP_TERMINAL</key><string>$DESKTOP_TERMINAL_CHOICE</string>"
 fi
+TS_SYSTEMD=""; TS_PLIST=""
+if [ "$WEBMUX_TAILSCALE_ENABLED" = 1 ]; then
+  TS_SYSTEMD="Environment=WEBMUX_TAILSCALE=1"
+  TS_PLIST="    <key>WEBMUX_TAILSCALE</key><string>1</string>"
+fi
 
 # --- service setup --------------------------------------------------------
 OS="$(uname -s)"
@@ -284,6 +304,7 @@ Environment=PORT=$PORT
 Environment=PATH=$SVC_PATH
 Environment=TMUX_BIN=$TMUX_BIN
 $DT_SYSTEMD
+$TS_SYSTEMD
 ExecStart=$NODE_BIN $DIR/server.js
 Restart=on-failure
 RestartSec=2
@@ -315,6 +336,7 @@ EOF
     <key>PATH</key><string>$SVC_PATH</string>
     <key>TMUX_BIN</key><string>$TMUX_BIN</string>
 $DT_PLIST
+$TS_PLIST
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
