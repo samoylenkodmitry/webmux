@@ -230,6 +230,17 @@ say "Installing dependencies (builds node-pty, vendors xterm.js)…"
 npm install --no-fund --no-audit
 NODE_BIN="$(command -v node)"
 
+# node-pty's prebuilt bindings (both 1.0 and 1.1) fail with "posix_spawnp failed"
+# on bleeding-edge Node/macOS combos (seen with Node 26 + macOS 26). The list
+# API still works because it uses child_process; only pty.spawn breaks, so the
+# picker shows sessions but attach silently fails. Verify the binding actually
+# spawns; if not, rebuild from source against the current Node ABI.
+if ! "$NODE_BIN" -e 'try{require("./node_modules/node-pty").spawn("/bin/sh",["-c",":"],{name:"xterm",cols:80,rows:24,cwd:process.env.HOME||"/",env:process.env});}catch(e){process.exit(1)}' >/dev/null 2>&1; then
+  say "Rebuilding node-pty from source (prebuilt binding doesn't work on this Node/OS)…"
+  ( cd node_modules/node-pty && npx --yes node-gyp rebuild ) \
+    || warn "node-pty rebuild failed. Install a C++ toolchain (macOS: xcode-select --install; Debian/Ubuntu: build-essential) and re-run."
+fi
+
 # A service starts with a minimal PATH that often misses Homebrew, so bake a good
 # PATH and the resolved tmux path in.
 SVC_PATH="$(dirname "$NODE_BIN")"
