@@ -98,7 +98,7 @@ detect_terminals() { # echo installed terminal tokens, one per line
 # Optionally make every interactive shell join tmux, so terminals opened normally
 # (Ghostty from the dock, etc.) show up in webmux. Idempotent; opt-in.
 setup_autostart() {
-  local rc had=0
+  local lifecycle="${1:-persistent}" rc had=0
   case "${SHELL##*/}" in zsh) rc="$HOME/.zshrc" ;; bash) rc="$HOME/.bashrc" ;; *) rc="$HOME/.zshrc" ;; esac
   if grep -q 'webmux tmux autostart' "$rc" 2>/dev/null; then
     had=1
@@ -120,16 +120,22 @@ if command -v tmux >/dev/null 2>&1 && [ -z "${TMUX:-}" ] && [ -z "${SSH_CONNECTI
       [ -n "$__wm" ] || __wm=shell
       __wm_b=$__wm; __wm_i=2
       while tmux has-session -t "=$__wm" 2>/dev/null; do __wm="$__wm_b-$__wm_i"; __wm_i=$((__wm_i + 1)); done
-      exec tmux new-session -s "$__wm"
+      exec tmux new-session -s "$__wm"@@TMUX_EXTRA@@
       ;;
   esac
 fi
 # <<< webmux tmux autostart <<<
 RC
+  # ephemeral: kill the session when the terminal window closes (no detached
+  # leftovers cluttering the picker). persistent: keep the session for re-attach.
+  local repl=""
+  [ "$lifecycle" = ephemeral ] && repl=' \\; set-option destroy-unattached on'
+  local tmp; tmp="$(mktemp)" || return 1
+  sed "s|@@TMUX_EXTRA@@|${repl}|" "$rc" > "$tmp" && mv "$tmp" "$rc"
   if [ "$had" = 1 ]; then
-    say "Refreshed webmux tmux autostart in $rc"
+    say "Refreshed webmux tmux autostart in $rc (lifecycle: $lifecycle)"
   else
-    say "Added tmux autostart to $rc — open a new terminal window for it to take effect."
+    say "Added tmux autostart to $rc (lifecycle: $lifecycle) — open a new terminal window for it to take effect."
   fi
 }
 # Hide tmux's status bar + enable system-clipboard copy. Re-run rewrites the
@@ -203,7 +209,11 @@ fi
 
 # Offer to make all normally-opened terminals show up in webmux (auto-tmux).
 if ask_yn "Make terminals you open normally show up in webmux too (auto-start tmux in new shells)? [y/N]" N; then
-  setup_autostart
+  AUTOSTART_LIFECYCLE=persistent
+  if ask_yn "  When you close that terminal window, also kill its tmux session? (n keeps it detached so you can re-attach from webmux later) [y/N]" N; then
+    AUTOSTART_LIFECYCLE=ephemeral
+  fi
+  setup_autostart "$AUTOSTART_LIFECYCLE"
 fi
 
 # Tailscale: offer to install it for private remote access from your phone.
