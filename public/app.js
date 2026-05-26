@@ -91,10 +91,22 @@ async function loadSessions() {
     const sessions = await fetchSessions();
     renderSessions(sessions);
     pickerStatus.textContent = '';
+    if (sessions.length === 0) checkHealth(); // empty could mean tmux is unreachable
   } catch (e) {
     pickerStatus.textContent = 'Failed to load sessions: ' + e.message;
   }
   loadRecents();
+}
+
+// If there are no sessions, distinguish "nothing running" from "tmux not found".
+async function checkHealth() {
+  try {
+    const h = await (await fetch('/api/health', { cache: 'no-store' })).json();
+    if (!h.ok) {
+      pickerStatus.textContent = `tmux not reachable (${h.tmuxBin}): ${h.tmux && h.tmux.error || 'unknown'}. ` +
+        `Install tmux, or set TMUX_BIN to its full path in the service.`;
+    }
+  } catch { /* ignore */ }
 }
 
 async function loadRecents() {

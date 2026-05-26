@@ -43,6 +43,15 @@ cd "$DIR"
 say "Installing dependencies (builds node-pty, vendors xterm.js)…"
 npm install --no-fund --no-audit
 NODE_BIN="$(command -v node)"
+TMUX_BIN="$(command -v tmux || true)"
+
+# A service (systemd/launchd) starts with a minimal PATH that often misses
+# Homebrew (/opt/homebrew/bin) — where tmux/node/ghostty live. Bake a good PATH
+# and the resolved tmux path so the service can actually find tmux.
+SVC_PATH="$(dirname "$NODE_BIN")"
+[ -n "$TMUX_BIN" ] && SVC_PATH="$SVC_PATH:$(dirname "$TMUX_BIN")"
+SVC_PATH="$SVC_PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+TMUX_BIN="${TMUX_BIN:-tmux}"
 
 # --- service setup --------------------------------------------------------
 OS="$(uname -s)"
@@ -61,6 +70,8 @@ Type=simple
 WorkingDirectory=$DIR
 Environment=HOST=$HOST
 Environment=PORT=$PORT
+Environment=PATH=$SVC_PATH
+Environment=TMUX_BIN=$TMUX_BIN
 # Desktop window emulator for sessions started from the web (must accept -e <cmd>):
 # Environment=DESKTOP_TERMINAL=ghostty
 ExecStart=$NODE_BIN $DIR/server.js
@@ -88,7 +99,12 @@ EOF
   <key>Label</key><string>com.$APP</string>
   <key>ProgramArguments</key><array><string>$NODE_BIN</string><string>$DIR/server.js</string></array>
   <key>WorkingDirectory</key><string>$DIR</string>
-  <key>EnvironmentVariables</key><dict><key>HOST</key><string>$HOST</string><key>PORT</key><string>$PORT</string></dict>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOST</key><string>$HOST</string>
+    <key>PORT</key><string>$PORT</string>
+    <key>PATH</key><string>$SVC_PATH</string>
+    <key>TMUX_BIN</key><string>$TMUX_BIN</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
 </dict></plist>

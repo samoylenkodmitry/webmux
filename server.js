@@ -30,13 +30,18 @@ const execFileP = promisify(execFile);
 const TMUX_SOCKET = process.env.TMUX_SOCKET || '';
 const tmuxArgv = (args) => (TMUX_SOCKET ? ['-L', TMUX_SOCKET, ...args] : args);
 
+// Absolute path or name of the tmux binary. Defaults to PATH lookup, but a
+// launchd/systemd service often has a minimal PATH that misses Homebrew, so the
+// installer bakes the resolved path in here.
+const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
+
 // Optional explicit terminal emulator for "open on PC" (must accept `-e <cmd…>`,
 // e.g. ghostty/kitty/alacritty/xterm). If unset, a per-OS default is used.
 const DESKTOP_TERMINAL = process.env.DESKTOP_TERMINAL || '';
 
 // How to spawn a terminal window that runs `tmux new-session -A -s <name>`.
 function desktopLaunchSpec(name) {
-  const run = ['tmux', ...(TMUX_SOCKET ? ['-L', TMUX_SOCKET] : []), 'new-session', '-A', '-s', name];
+  const run = [TMUX_BIN, ...(TMUX_SOCKET ? ['-L', TMUX_SOCKET] : []), 'new-session', '-A', '-s', name];
   if (DESKTOP_TERMINAL) return [DESKTOP_TERMINAL, ['-e', ...run]];
   if (process.platform === 'darwin') {
     // macOS apps generally can't be driven by `-e` from the CLI, so open a
@@ -74,7 +79,7 @@ const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 // --- tmux helpers ----------------------------------------------------------
 
 async function tmux(args) {
-  const { stdout } = await execFileP('tmux', tmuxArgv(args), { encoding: 'utf8' });
+  const { stdout } = await execFileP(TMUX_BIN, tmuxArgv(args), { encoding: 'utf8' });
   return stdout;
 }
 
@@ -235,6 +240,19 @@ async function serveStatic(req, res, url) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  if (url.pathname === '/api/health') {
+    let tmuxState;
+    try { tmuxState = { found: true, version: (await tmux(['-V'])).trim() }; }
+    catch (e) { tmuxState = { found: false, error: e.message || String(e) }; }
+    return sendJson(res, 200, {
+      ok: tmuxState.found,
+      platform: process.platform,
+      node: process.version,
+      tmuxBin: TMUX_BIN,
+      tmux: tmuxState,
+      PATH: process.env.PATH,
+    });
+  }
   if (url.pathname === '/api/sessions') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
     return sendJson(res, 200, { sessions: await listSessions() });
@@ -377,17 +395,17 @@ async function startSession(ws, mode, name, url) {
       if (url.searchParams.get('desktop') === '1') launchDesktop(name);
       args = ['attach-session', '-t', `=${name}`];
     }
-  } catch {
+  } catch (e) {
     sendCtrl(ws, {
       type: 'error',
-      message: mode === 'attach' ? `session not found: ${name}` : 'could not create session',
+      message: mode === 'attach' ? `session not found: ${name}` : `could not create session: ${e.message || e}`,
     });
     return ws.close();
   }
 
   let term;
   try {
-    term = pty.spawn('tmux', tmuxArgv(args), {
+    term = pty.spawn(TMUX_BIN, tmuxArgv(args), {
       name: TERM_NAME,
       cols,
       rows,
