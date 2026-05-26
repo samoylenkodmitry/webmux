@@ -83,6 +83,33 @@ detect_terminals() { # echo installed terminal tokens, one per line
   fi
   return 0
 }
+# Optionally make every interactive shell join tmux, so terminals opened normally
+# (Ghostty from the dock, etc.) show up in webmux. Idempotent; opt-in.
+setup_autostart() {
+  local rc
+  case "${SHELL##*/}" in zsh) rc="$HOME/.zshrc" ;; bash) rc="$HOME/.bashrc" ;; *) rc="$HOME/.zshrc" ;; esac
+  if grep -q 'webmux tmux autostart' "$rc" 2>/dev/null; then say "tmux autostart already in $rc"; return 0; fi
+  if grep -qE 'phone-terminal-tmux-autostart|exec tmux new-session' "$rc" 2>/dev/null; then
+    warn "An existing tmux autostart is already in $rc — leaving it untouched."; return 0; fi
+  cat >> "$rc" <<'RC'
+
+# >>> webmux tmux autostart >>>
+# Join a uniquely-named tmux session in interactive shells so terminals opened
+# normally appear in webmux. Remove this block to disable.
+if command -v tmux >/dev/null 2>&1 && [ -z "${TMUX:-}" ] && [ -z "${SSH_CONNECTION:-}" ]; then
+  case "$-" in
+    *i*)
+      __wm=$(basename "$PWD"); [ "$PWD" = "$HOME" ] && __wm=home
+      __wm_b=$__wm; __wm_i=2
+      while tmux has-session -t "=$__wm" 2>/dev/null; do __wm="$__wm_b-$__wm_i"; __wm_i=$((__wm_i + 1)); done
+      exec tmux new-session -s "$__wm"
+      ;;
+  esac
+fi
+# <<< webmux tmux autostart <<<
+RC
+  say "Added tmux autostart to $rc — open a new terminal window for it to take effect."
+}
 
 # --- locate or fetch the source ------------------------------------------
 SRC=""
@@ -113,6 +140,11 @@ DESKTOP_TERMINAL_CHOICE=""
 if [ -n "$TERMLIST" ]; then
   DESKTOP_TERMINAL_CHOICE="$(choose "Which terminal should 'New' open on this machine's desktop?" "$TERMLIST")"
   say "Desktop terminal for 'New': $DESKTOP_TERMINAL_CHOICE"
+fi
+
+# Offer to make all normally-opened terminals show up in webmux (auto-tmux).
+if ask_yn "Make terminals you open normally show up in webmux too (auto-start tmux in new shells)? [y/N]" N; then
+  setup_autostart
 fi
 
 if [ -n "$SRC" ]; then

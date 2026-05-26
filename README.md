@@ -40,7 +40,7 @@ Because every session lives in tmux on the PC, nothing is lost when the phone di
 curl -fsSL https://raw.githubusercontent.com/samoylenkodmitry/webmux/main/install.sh | bash
 ```
 
-Installs a background service on `127.0.0.1:8083` (systemd user service on Linux, launchd agent on macOS). It's **interactive**: it offers to install `tmux` if missing, and lets you choose which installed terminal **New** should open on the desktop. **Requires** Node ≥ 18, npm, and a C toolchain for the native PTY module (Linux: `base-devel`/`build-essential` + `python3`; macOS: Xcode Command Line Tools). Set `WEBMUX_NONINTERACTIVE=1` to accept defaults silently.
+Installs a background service on `127.0.0.1:8083` (systemd user service on Linux, launchd agent on macOS). It's **interactive**: it offers to install `tmux` if missing, lets you choose which installed terminal **New** opens on the desktop, and can optionally auto-start tmux in new shells so terminals you open normally also appear in webmux. **Requires** Node ≥ 18, npm, and a C toolchain for the native PTY module (Linux: `base-devel`/`build-essential` + `python3`; macOS: Xcode Command Line Tools). Set `WEBMUX_NONINTERACTIVE=1` to accept defaults silently.
 
 Then expose it privately to your other devices:
 
@@ -72,7 +72,8 @@ npm start     # http://127.0.0.1:8083
 ```
 
 ## Notes
-- **Linux & macOS** supported (open-on-PC uses Ghostty on Linux, Terminal.app on macOS). **Windows:** run under WSL (Linux from there).
+- webmux only sees **tmux** sessions. To make terminals you open normally show up, let the installer add the **auto-tmux** snippet to your shell rc (it's guarded by `# >>> webmux tmux autostart >>>` markers — delete that block to undo).
+- **Linux & macOS** supported (open-on-PC uses Ghostty on Linux, Terminal.app/iTerm/Ghostty on macOS via your installer choice). **Windows:** run under WSL (Linux from there).
 - "Open on PC" is best-effort; with no display it falls back to a browser-only session.
 - Bind stays on localhost by design — put a private tunnel (Tailscale) in front rather than exposing the port.
 - HTTP API: `/api/sessions`, `/api/session`, `/api/recents`, `/api/capture`, `/api/windows`, `/api/kill`; WebSocket at `/ws/session/<name>` and `/ws/new`. See [`server.js`](server.js).
