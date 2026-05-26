@@ -13,6 +13,7 @@
 // the session alive as long as another client (e.g. local Ghostty) is attached;
 // `destroy-unattached on` only reaps it once the last client leaves.
 import http from 'node:http';
+import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -73,6 +74,36 @@ async function runTailscale(args) {
   return (await execFileP(bin, args, { encoding: 'utf8' })).stdout;
 }
 
+// Probe https://<dns>/api/health by connecting to the peer's Tailscale IP and
+// presenting the MagicDNS name via SNI + Host. The serve cert is issued for that
+// name, so TLS still validates — and it works even when *this* node's MagicDNS
+// can't resolve `.ts.net` (a common DNS-integration gap on Linux). Returns the
+// parsed health JSON if it's a webmux instance, else null.
+function probeWebmuxHealth(ip, dns, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const req = https.request(
+      { host: ip, port: 443, servername: dns, path: '/api/health', method: 'GET', headers: { Host: dns }, timeout: timeoutMs },
+      (res) => {
+        if (res.statusCode !== 200) { res.resume(); return finish(null); }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { body += c; if (body.length > 65536) req.destroy(); });
+        res.on('end', () => {
+          try {
+            const j = JSON.parse(body);
+            finish(j && typeof j === 'object' && 'tmuxBin' in j ? j : null);
+          } catch { finish(null); }
+        });
+      }
+    );
+    req.on('error', () => finish(null));
+    req.on('timeout', () => { req.destroy(); finish(null); });
+    req.end();
+  });
+}
+
 // Cached peer probe — discovering peers means an HTTPS round-trip to every
 // online tailnet node, so we cache the result for a few seconds rather than
 // hammering on every picker refresh.
@@ -87,21 +118,15 @@ async function tailscalePeers() {
     try {
       const status = JSON.parse(await runTailscale(['status', '--json']));
       const peers = Object.values(status.Peer || {})
-        .filter((p) => p.Online && p.DNSName)
-        .map((p) => ({ name: p.HostName || p.DNSName, dns: p.DNSName.replace(/\.$/, '') }));
+        .filter((p) => p.Online && p.DNSName && Array.isArray(p.TailscaleIPs) && p.TailscaleIPs.length)
+        .map((p) => {
+          const dns = p.DNSName.replace(/\.$/, '');
+          const ip = p.TailscaleIPs.find((a) => a.includes('.')) || p.TailscaleIPs[0];
+          return { name: p.HostName || dns, dns, ip, url: `https://${dns}/` };
+        });
       const probes = peers.map(async (p) => {
-        const url = `https://${p.dns}/`;
-        try {
-          const ctrl = new AbortController();
-          const t = setTimeout(() => ctrl.abort(), 2000);
-          const res = await fetch(`${url}api/health`, { signal: ctrl.signal });
-          clearTimeout(t);
-          if (!res.ok) return null;
-          const body = await res.json();
-          // Distinguish a webmux instance from any other HTTPS service on /api/health.
-          if (!body || typeof body !== 'object' || !('tmuxBin' in body)) return null;
-          return { ...p, url };
-        } catch { return null; }
+        const health = await probeWebmuxHealth(p.ip, p.dns, 2500);
+        return health ? { name: p.name, dns: p.dns, url: p.url } : null;
       });
       return (await Promise.all(probes)).filter(Boolean);
     } catch {
