@@ -237,7 +237,7 @@ for c in "$HOME/.local/bin/tailscale" /opt/homebrew/bin/tailscale /usr/local/bin
 done
 command -v tailscale >/dev/null 2>&1 && TAILSCALE_PRESENT=1
 if [ "$TAILSCALE_PRESENT" = 1 ]; then
-  if ask_yn "Auto-discover Tailscale URL and show it in the picker? [Y/n]" Y; then
+  if ask_yn "Show your Tailscale share URL (and other webmux instances on the tailnet) in the picker? [Y/n]" Y; then
     WEBMUX_TAILSCALE_ENABLED=1
   fi
 fi
