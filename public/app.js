@@ -272,7 +272,7 @@ $('new').addEventListener('click', () => openSession('new'));
 // =====================  Terminal  ========================================
 
 let fontSize = clampFont(parseInt(localStorage.getItem('ptw-font') || '14', 10));
-function clampFont(px) { return Math.max(9, Math.min(28, Number.isFinite(px) ? px : 14)); }
+function clampFont(px) { return Math.max(4, Math.min(28, Number.isFinite(px) ? px : 14)); }
 function setFontSize(px) {
   fontSize = clampFont(px);
   localStorage.setItem('ptw-font', String(fontSize));
