@@ -122,7 +122,6 @@ setup_tmux_tweaks() {
 
 # >>> webmux tmux tweaks >>>
 set -g status off        # hide tmux's status bar (clean terminal)
-set -g mouse on          # mouse / touch scrolling (webmux relies on this)
 set -g set-clipboard on  # let copy reach the system clipboard
 # <<< webmux tmux tweaks <<<
 RC
@@ -130,7 +129,6 @@ RC
   fi
   # Apply to a running server immediately (new + existing sessions).
   tmux set -g status off       2>/dev/null || true
-  tmux set -g mouse on         2>/dev/null || true
   tmux set -g set-clipboard on 2>/dev/null || true
 }
 install_tailscale() {
@@ -166,8 +164,8 @@ if [ -z "$TMUX_BIN" ]; then
 fi
 [ -z "$TMUX_BIN" ] && warn "Continuing without tmux — webmux won't work until it's installed; re-run this installer afterwards."
 
-# tmux look: offer to hide the status bar + enable mouse/touch scrolling
-if [ -n "$TMUX_BIN" ] && ask_yn "Customize tmux to hide its status bar and enable mouse scrolling (recommended)? [y/N]" N; then
+# tmux look: offer to hide the status bar (cleaner terminals)
+if [ -n "$TMUX_BIN" ] && ask_yn "Customize tmux to hide its status bar (cleaner terminals)? [y/N]" N; then
   setup_tmux_tweaks
 fi
 
