@@ -241,8 +241,20 @@ if [ -n "$SRC" ]; then
   DIR="$SRC"; say "Using checkout at $DIR"
 else
   DIR="${WEBMUX_DIR:-$HOME/.local/share/$APP}"
-  if [ -d "$DIR/.git" ]; then say "Updating $DIR"; git -C "$DIR" pull --ff-only --quiet || true
-  else say "Cloning into $DIR"; git clone --depth 1 "$REPO" "$DIR"; fi
+  if [ -d "$DIR/.git" ]; then
+    say "Updating $DIR"
+    # Force to the latest published commit. `git pull --ff-only` fails (silently)
+    # when the working tree is dirty — and `npm install` rewrites the committed
+    # package-lock.json, so a plain pull would never update. fetch + reset is the
+    # robust "deploy" that discards such churn (node_modules/vendor are ignored).
+    if git -C "$DIR" fetch --depth 1 --quiet origin main 2>/dev/null; then
+      git -C "$DIR" reset --hard --quiet origin/main 2>/dev/null || warn "couldn't reset $DIR; using existing copy"
+    else
+      warn "couldn't fetch updates for $DIR; using existing copy"
+    fi
+  else
+    say "Cloning into $DIR"; git clone --depth 1 "$REPO" "$DIR"
+  fi
 fi
 
 cd "$DIR"
