@@ -8,6 +8,10 @@ const sessionsEl = $('sessions');
 const pickerEmpty = $('picker-empty');
 const pickerStatus = $('picker-status');
 const termNameEl = $('term-name');
+const termTitleEl = $('term-title');
+const termSubEl = $('term-sub');
+const recentsSectionEl = $('recents-section');
+const recentsListEl = $('recents');
 const connEl = $('conn');
 const overlay = $('overlay');
 const overlayText = $('overlay-text');
@@ -89,6 +93,36 @@ async function loadSessions() {
     pickerStatus.textContent = '';
   } catch (e) {
     pickerStatus.textContent = 'Failed to load sessions: ' + e.message;
+  }
+  loadRecents();
+}
+
+async function loadRecents() {
+  let recents = [];
+  try {
+    const res = await fetch('/api/recents', { cache: 'no-store' });
+    recents = (await res.json()).recents || [];
+  } catch { /* leave empty */ }
+  recentsListEl.innerHTML = '';
+  recentsSectionEl.hidden = recents.length === 0;
+  for (const r of recents) {
+    const li = document.createElement('li');
+    li.className = 'session';
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = r.path || r.dir;
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    sub.textContent = 'last: ' + (r.command || 'shell');
+    meta.append(name, sub);
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = '＋ open';
+    li.append(meta, badge);
+    li.addEventListener('click', () => openSession('new', null, { dir: r.dir }));
+    recentsListEl.append(li);
   }
 }
 
@@ -397,16 +431,22 @@ function sendBytes(str) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(new TextEncoder().encode(str));
 }
 
-// Open from the picker: show the terminal view, then (re)attach.
-function openSession(mode, name) {
+function setSessionLabel(text) {
+  termTitleEl.textContent = text;
+  termSubEl.textContent = '';
+}
+
+// Open from the picker: show the terminal view, then (re)attach. opts.dir starts
+// a new session in that directory (used by the "recent directories" list).
+function openSession(mode, name, opts = {}) {
   ensureTerm();
   pickerView.hidden = true;
   termView.hidden = false;
-  requestAnimationFrame(() => switchSession(mode, name));
+  requestAnimationFrame(() => switchSession(mode, name, opts));
 }
 
 // Switch the live terminal to a different session without leaving the view.
-function switchSession(mode, name) {
+function switchSession(mode, name, opts = {}) {
   closeSwitcher();
   teardownWs();
   clearMods();
@@ -414,14 +454,14 @@ function switchSession(mode, name) {
   userDetached = false;
   reconnectDelay = 500;
   currentName = mode === 'attach' ? name : null;
-  termNameEl.textContent = mode === 'attach' ? name : 'new session…';
+  setSessionLabel(mode === 'attach' ? name : 'new session…');
   if (term) term.reset();
   doFit();
-  connect(mode, name);
+  connect(mode, name, opts);
   if (term) term.focus();
 }
 
-function wsUrl(mode, name) {
+function wsUrl(mode, name, opts = {}) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const dims = term ? `cols=${term.cols}&rows=${term.rows}` : '';
   if (mode === 'attach') {
@@ -431,6 +471,7 @@ function wsUrl(mode, name) {
   // persist after the browser leaves and are visible locally.
   const params = [dims, 'desktop=1'];
   if (name) params.push(`name=${encodeURIComponent(name)}`);
+  if (opts.dir) params.push(`dir=${encodeURIComponent(opts.dir)}`);
   return `${proto}://${location.host}/ws/new?${params.join('&')}`;
 }
 
@@ -444,10 +485,10 @@ function teardownWs() {
   }
 }
 
-function connect(mode, name) {
+function connect(mode, name, opts = {}) {
   clearTimeout(reconnectTimer);
   setConn('connecting', 'connecting…');
-  ws = new WebSocket(wsUrl(mode, name));
+  ws = new WebSocket(wsUrl(mode, name, opts));
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
@@ -455,6 +496,7 @@ function connect(mode, name) {
     overlay.hidden = true;
     setConn('ok', 'connected');
     doFit(); // push our real size to tmux
+    startTitlePolling();
   };
 
   ws.onmessage = (ev) => {
@@ -479,7 +521,9 @@ function onControl(msg) {
       break;
     case 'session':
       currentName = msg.name;
-      termNameEl.textContent = msg.name;
+      termTitleEl.textContent = msg.name;
+      history.replaceState(null, '', '#s=' + encodeURIComponent(msg.name)); // bookmarkable
+      refreshTitle();
       break;
     case 'error':
       overlay.hidden = false;
@@ -510,9 +554,11 @@ function backToPicker() {
   copyViewEl.hidden = true;
   clearMods();
   teardownWs();
+  stopTitlePolling();
   overlay.hidden = true;
   termView.hidden = true;
   pickerView.hidden = false;
+  history.replaceState(null, '', location.pathname + location.search); // drop #s=
   if (term) term.reset();
   loadSessions();
 }
@@ -520,6 +566,30 @@ function backToPicker() {
 function setConn(cls, text) {
   connEl.className = 'conn ' + cls; // dot rendered via CSS; color conveys state
   connEl.title = text;
+}
+
+// --- dynamic title: reflect the session's live command + directory ---------
+let titleTimer = null;
+async function refreshTitle() {
+  if (!currentName) return;
+  try {
+    const res = await fetch('/api/session?name=' + encodeURIComponent(currentName), { cache: 'no-store' });
+    if (!res.ok) return;
+    const s = await res.json();
+    termSubEl.textContent = (s.command || '') + (s.path ? '  ·  ' + s.path : '');
+    document.title = (s.command ? s.command + ' — ' : '') + (s.path || currentName);
+  } catch { /* leave previous */ }
+}
+function startTitlePolling() {
+  clearInterval(titleTimer);
+  refreshTitle();
+  titleTimer = setInterval(refreshTitle, 4000);
+}
+function stopTitlePolling() {
+  clearInterval(titleTimer);
+  titleTimer = null;
+  termSubEl.textContent = '';
+  document.title = 'terminal';
 }
 
 // --- copy view: full tmux history as selectable DOM text ------------------
@@ -804,5 +874,12 @@ if ('serviceWorker' in navigator) {
   });
 }
 
+// --- deep link: open directly into #s=<name> -----------------------------
+function openFromHash() {
+  const m = /^#s=(.+)$/.exec(location.hash);
+  if (m) openSession('attach', decodeURIComponent(m[1]));
+}
+
 // =====================  boot  ============================================
 loadSessions();
+openFromHash();

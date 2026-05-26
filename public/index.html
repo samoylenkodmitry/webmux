@@ -26,8 +26,14 @@
         <button id="new" class="btn btn-primary">＋ New</button>
       </div>
     </header>
-    <ul id="sessions" class="sessions"></ul>
-    <p id="picker-empty" class="empty" hidden>No tmux sessions running. Tap “＋ New” to start one.</p>
+    <div class="picker-body">
+      <ul id="sessions" class="sessions"></ul>
+      <p id="picker-empty" class="empty" hidden>No tmux sessions running. Tap “＋ New” to start one.</p>
+      <div id="recents-section" hidden>
+        <div class="section-label">Recent directories</div>
+        <ul id="recents" class="sessions"></ul>
+      </div>
+    </div>
     <p id="picker-status" class="status"></p>
   </section>
 
@@ -35,7 +41,10 @@
   <section id="terminal-view" class="view" hidden>
     <header class="bar">
       <button id="back" class="btn" title="Detach &amp; back">←</button>
-      <button id="term-name" class="term-name" title="Switch session"></button>
+      <button id="term-name" class="term-name" title="Switch session">
+        <span id="term-title" class="term-title"></span>
+        <span id="term-sub" class="term-sub"></span>
+      </button>
       <span id="conn" class="conn"></span>
       <div class="bar-actions">
         <button id="copy" class="btn" title="Select / copy text">⧉</button>

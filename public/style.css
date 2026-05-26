@@ -54,6 +54,9 @@ html, body {
 .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 
 /* Session list */
+.picker-body { flex: 1; overflow-y: auto; }
+.picker-body .sessions { flex: none; overflow: visible; }
+.section-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; padding: 10px 14px 4px; }
 .sessions { list-style: none; margin: 0; padding: 8px; overflow-y: auto; flex: 1; }
 .session {
   display: flex;
@@ -86,23 +89,27 @@ html, body {
 
 /* Terminal */
 .term-name {
-  font-weight: 600;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   background: #21262d;
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 7px 12px;
+  padding: 4px 10px;
   min-height: 38px;
   flex: 1 1 auto;
   min-width: 0;
   text-align: left;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   cursor: pointer;
 }
-.term-name::after { content: " ▾"; color: var(--muted); }
+.term-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-title::after { content: " ▾"; color: var(--muted); font-weight: 400; }
+.term-sub { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-sub:empty { display: none; }
 .conn { flex: none; font-size: 11px; }
 .conn::before { content: "●"; }
 .conn { font-size: 12px; color: var(--muted); }

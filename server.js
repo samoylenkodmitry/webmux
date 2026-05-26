@@ -13,8 +13,9 @@
 // the session alive as long as another client (e.g. local Ghostty) is attached;
 // `destroy-unattached on` only reaps it once the last client leaves.
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -23,20 +24,36 @@ import pty from 'node-pty';
 
 const execFileP = promisify(execFile);
 
-// Terminal emulator used to open a session on the local desktop. Override with
-// DESKTOP_TERMINAL (must accept `-e <cmd...>`, like ghostty/kitty/alacritty/xterm).
-const DESKTOP_TERMINAL = process.env.DESKTOP_TERMINAL || 'ghostty';
+// Optional: target a specific tmux server socket (tmux -L <name>). Defaults to
+// the user's normal server. `-L` ignores the $TMUX env var, so it also gives
+// real isolation when running a second instance.
+const TMUX_SOCKET = process.env.TMUX_SOCKET || '';
+const tmuxArgv = (args) => (TMUX_SOCKET ? ['-L', TMUX_SOCKET, ...args] : args);
+
+// Optional explicit terminal emulator for "open on PC" (must accept `-e <cmd…>`,
+// e.g. ghostty/kitty/alacritty/xterm). If unset, a per-OS default is used.
+const DESKTOP_TERMINAL = process.env.DESKTOP_TERMINAL || '';
+
+// How to spawn a terminal window that runs `tmux new-session -A -s <name>`.
+function desktopLaunchSpec(name) {
+  const run = ['tmux', ...(TMUX_SOCKET ? ['-L', TMUX_SOCKET] : []), 'new-session', '-A', '-s', name];
+  if (DESKTOP_TERMINAL) return [DESKTOP_TERMINAL, ['-e', ...run]];
+  if (process.platform === 'darwin') {
+    // macOS apps generally can't be driven by `-e` from the CLI, so open a
+    // Terminal.app window via AppleScript. `name` is validated by NAME_RE, so
+    // there are no quotes/spaces to escape inside the script string.
+    return ['osascript', ['-e', `tell application "Terminal" to do script "${run.join(' ')}"`]];
+  }
+  return ['ghostty', ['-e', ...run]]; // Linux default
+}
 
 // Open a real terminal window on the PC attached to the tmux session, so it is
 // visible locally and (being a second client) outlives the browser. Best-effort:
 // if there's no display or the emulator is missing, the web session still works.
 function launchDesktop(name) {
+  const [cmd, args] = desktopLaunchSpec(name);
   try {
-    const child = spawn(DESKTOP_TERMINAL, ['-e', 'tmux', 'new-session', '-A', '-s', name], {
-      detached: true,
-      stdio: 'ignore',
-      env: process.env,
-    });
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore', env: process.env });
     child.on('error', () => {}); // emulator missing / no DISPLAY: ignore
     child.unref();
   } catch { /* ignore */ }
@@ -57,7 +74,7 @@ const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 // --- tmux helpers ----------------------------------------------------------
 
 async function tmux(args) {
-  const { stdout } = await execFileP('tmux', args, { encoding: 'utf8' });
+  const { stdout } = await execFileP('tmux', tmuxArgv(args), { encoding: 'utf8' });
   return stdout;
 }
 
@@ -117,6 +134,64 @@ async function listWindows(name) {
   });
 }
 
+// One session's live command + directory (for the dynamic browser title).
+async function sessionInfo(name) {
+  const out = await tmux(['display-message', '-p', '-t', `=${name}:`, '#{pane_current_command}\t#{pane_current_path}']);
+  const [command, dir] = out.trim().split('\t');
+  return { name, command: command || '', dir: dir || '', path: prettyPath(dir || '') };
+}
+
+// --- recent directories (history of closed sessions) -----------------------
+// We sample live sessions; when one disappears, its last directory + command is
+// pushed to a small persisted list so it can be reopened from the picker.
+const STATE_DIR = process.env.WEBMUX_STATE || path.join(os.homedir(), '.local', 'state', 'webmux');
+const HISTORY_FILE = path.join(STATE_DIR, 'recents.json');
+const RECENTS_MAX = 30;
+let recents = [];
+let seen = new Map(); // session name -> { dir, command }
+
+async function loadRecents() {
+  try {
+    const data = JSON.parse(await readFile(HISTORY_FILE, 'utf8'));
+    if (Array.isArray(data)) recents = data.filter((r) => r && r.dir).slice(0, RECENTS_MAX);
+  } catch { /* no history yet */ }
+}
+
+let saveTimer = null;
+function saveRecents() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    try {
+      await mkdir(STATE_DIR, { recursive: true });
+      await writeFile(HISTORY_FILE, JSON.stringify(recents, null, 2));
+    } catch { /* best effort */ }
+  }, 500);
+}
+
+function recordRecent(dir, command) {
+  if (!dir) return;
+  recents = recents.filter((r) => r.dir !== dir);
+  recents.unshift({ dir, command: command || '', ts: Date.now() });
+  if (recents.length > RECENTS_MAX) recents.length = RECENTS_MAX;
+  saveRecents();
+}
+
+async function sampleSessions() {
+  let out = '';
+  try {
+    out = await tmux(['list-sessions', '-F', '#{session_name}\t#{pane_current_path}\t#{pane_current_command}']);
+  } catch { /* no server -> every tracked session has closed */ }
+  const current = new Map();
+  for (const line of out.split('\n').filter(Boolean)) {
+    const [name, dir, command] = line.split('\t');
+    current.set(name, { dir, command });
+  }
+  for (const [name, info] of seen) {
+    if (!current.has(name)) recordRecent(info.dir, info.command);
+  }
+  seen = current;
+}
+
 // --- tiny HTTP layer -------------------------------------------------------
 
 const TYPES = {
@@ -163,6 +238,22 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/sessions') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
     return sendJson(res, 200, { sessions: await listSessions() });
+  }
+  if (url.pathname === '/api/recents') {
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+    const open = new Set([...seen.values()].map((s) => s.dir));
+    // Hide dirs that currently have a live session; abbreviate for display.
+    const list = recents
+      .filter((r) => !open.has(r.dir))
+      .map((r) => ({ dir: r.dir, path: prettyPath(r.dir), command: r.command, ts: r.ts }));
+    return sendJson(res, 200, { recents: list });
+  }
+  if (url.pathname === '/api/session') {
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+    const name = url.searchParams.get('name') || '';
+    if (!NAME_RE.test(name)) return sendJson(res, 400, { error: 'invalid session name' });
+    try { return sendJson(res, 200, await sessionInfo(name)); }
+    catch { return sendJson(res, 404, { error: 'session not found' }); }
   }
   if (url.pathname === '/api/capture') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
@@ -273,12 +364,16 @@ async function startSession(ws, mode, name, url) {
       args = ['attach-session', '-t', `=${name}`];
     } else {
       name = await uniqueName(name);
+      // Optional start directory (e.g. reopening a recent dir from history).
+      const dir = url.searchParams.get('dir') || '';
+      const create = ['new-session', '-d', '-s', name];
+      if (dir) create.push('-c', dir);
       // Create the session up front — detached and persistent — in one atomic
       // command. The global `destroy-unattached on` would otherwise reap it the
       // instant no client is attached (e.g. before the desktop window attaches,
       // or after the phone leaves). Setting destroy-unattached off per-session
       // makes it always survive and stay returnable. Then attach the browser.
-      await tmux(['new-session', '-d', '-s', name, ';', 'set-option', '-t', name, 'destroy-unattached', 'off']);
+      await tmux([...create, ';', 'set-option', '-t', name, 'destroy-unattached', 'off']);
       if (url.searchParams.get('desktop') === '1') launchDesktop(name);
       args = ['attach-session', '-t', `=${name}`];
     }
@@ -292,7 +387,7 @@ async function startSession(ws, mode, name, url) {
 
   let term;
   try {
-    term = pty.spawn('tmux', args, {
+    term = pty.spawn('tmux', tmuxArgv(args), {
       name: TERM_NAME,
       cols,
       rows,
@@ -341,8 +436,15 @@ async function startSession(ws, mode, name, url) {
 }
 
 server.listen(PORT, HOST, () => {
-  console.log(`phone-terminal-web listening on http://${HOST}:${PORT}`);
+  console.log(`webmux listening on http://${HOST}:${PORT}`);
 });
+
+// Track recent directories: seed from current sessions, then sample so that a
+// session disappearing records its last directory into the history.
+await loadRecents();
+await sampleSessions();
+const sampler = setInterval(() => { sampleSessions().catch(() => {}); }, 5000);
+sampler.unref();
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
