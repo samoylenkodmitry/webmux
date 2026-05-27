@@ -224,6 +224,14 @@ async function tmux(args) {
   return stdout;
 }
 
+async function ensureTmuxMouse() {
+  try {
+    await tmux(['set-option', '-g', 'mouse', 'on']);
+  } catch {
+    // Attach/create paths below will report real tmux failures to the client.
+  }
+}
+
 function prettyPath(p) {
   if (!p) return '';
   if (p === HOME) return '~';
@@ -447,6 +455,7 @@ const server = http.createServer(async (req, res) => {
     if (!NAME_RE.test(name)) return sendJson(res, 400, { error: 'invalid session name' });
     try {
       await tmux(['has-session', '-t', `=${name}`]); // throws if missing
+      await ensureTmuxMouse();
       launchDesktop(name);
       return sendJson(res, 200, { ok: true });
     } catch {
@@ -543,6 +552,7 @@ async function startSession(ws, mode, name, url) {
 
   let args;
   try {
+    await ensureTmuxMouse();
     if (mode === 'attach') {
       if (!NAME_RE.test(name)) throw new Error('invalid session name');
       await tmux(['has-session', '-t', `=${name}`]); // throws if missing

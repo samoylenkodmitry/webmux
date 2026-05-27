@@ -123,6 +123,7 @@ if command -v tmux >/dev/null 2>&1 && [ -z "${TMUX:-}" ] && [ -z "${SSH_CONNECTI
       __wm=$(basename "$PWD"); [ "$PWD" = "$HOME" ] && __wm=home
       __wm=$(printf '%s' "$__wm" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_-' '-' | tr -s '-' | sed -e 's/^[-_]*//' -e 's/[-_]*$//')
       [ -n "$__wm" ] || __wm=shell
+      tmux set-option -g mouse on 2>/dev/null || true
       __wm_b=$__wm; __wm_i=2
       while tmux has-session -t "=$__wm" 2>/dev/null; do __wm="$__wm_b-$__wm_i"; __wm_i=$((__wm_i + 1)); done
       exec tmux new-session -s "$__wm"
@@ -137,8 +138,9 @@ RC
     say "Added tmux autostart to $rc — open a new terminal window for it to take effect."
   fi
 }
-# Hide tmux's status bar + enable system-clipboard copy. Re-run rewrites the
-# block so older settings (e.g. the previous `mouse on`) are dropped.
+# Hide tmux's status bar, enable system-clipboard copy, and keep mouse scrollback
+# active. webmux touch scrolling and local terminal wheel scrolling both depend
+# on tmux mouse mode.
 setup_tmux_tweaks() {
   local conf="$HOME/.tmux.conf" had=0
   grep -q 'webmux tmux tweaks' "$conf" 2>/dev/null && had=1
@@ -148,6 +150,7 @@ setup_tmux_tweaks() {
 # >>> webmux tmux tweaks >>>
 set -g status off        # hide tmux's status bar (clean terminal)
 set -g set-clipboard on  # let copy reach the system clipboard
+set -g mouse on          # keep wheel/touch scrolling in tmux scrollback
 # <<< webmux tmux tweaks <<<
 RC
   if [ "$had" = 1 ]; then
@@ -155,10 +158,11 @@ RC
   else
     say "Added webmux tmux tweaks to $conf"
   fi
-  # Apply to the running server — and revert prior installer's `mouse on`.
+  # Apply to the running server too; existing tmux servers do not automatically
+  # reread config files after installer updates.
   tmux set -g status off       2>/dev/null || true
   tmux set -g set-clipboard on 2>/dev/null || true
-  tmux set -g mouse  off       2>/dev/null || true
+  tmux set -g mouse on         2>/dev/null || true
 }
 install_tailscale() {
   case "$(uname -s)" in
