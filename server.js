@@ -437,6 +437,22 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 404, { error: 'capture failed' });
     }
   }
+  if (url.pathname === '/api/open') {
+    // Open an existing session as a real terminal window on the PC. Useful for
+    // sessions that only live in tmux (created from the phone, or auto-tmux) and
+    // aren't yet visible at the desk. launchDesktop runs `tmux new-session -A`,
+    // which attaches to the existing session rather than creating a new one.
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+    const name = url.searchParams.get('name') || '';
+    if (!NAME_RE.test(name)) return sendJson(res, 400, { error: 'invalid session name' });
+    try {
+      await tmux(['has-session', '-t', `=${name}`]); // throws if missing
+      launchDesktop(name);
+      return sendJson(res, 200, { ok: true });
+    } catch {
+      return sendJson(res, 404, { error: 'session not found' });
+    }
+  }
   if (url.pathname === '/api/kill') {
     if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
     const name = url.searchParams.get('name') || '';

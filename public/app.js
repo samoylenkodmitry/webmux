@@ -852,6 +852,21 @@ $('menu-reconnect').addEventListener('click', () => {
 
 $('menu-windows').addEventListener('click', () => { closeMenu(); openWindows(); });
 
+// Pop the current session open as a real terminal window on the PC (it attaches
+// the existing session, so the desktop and the browser share the same tmux).
+$('menu-open-pc').addEventListener('click', async () => {
+  const btn = $('menu-open-pc');
+  if (!currentName) { closeMenu(); return; }
+  const prev = btn.textContent;
+  try {
+    const res = await fetch('/api/open?name=' + encodeURIComponent(currentName), { method: 'POST' });
+    btn.textContent = res.ok ? '🖥 Opened on PC ✓' : '🖥 Could not open';
+  } catch {
+    btn.textContent = '🖥 Could not open';
+  }
+  setTimeout(() => { btn.textContent = prev; closeMenu(); if (term) term.focus(); }, 1100);
+});
+
 $('menu-kill').addEventListener('click', async () => {
   if (!currentName) { closeMenu(); return; }
   const ok = await askConfirm({
