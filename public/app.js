@@ -109,7 +109,8 @@ async function loadMachines() {
   try { data = await (await fetch('/api/tailnet', { cache: 'no-store' })).json(); }
   catch { wrap.hidden = true; return; }
   const peers = Array.isArray(data.peers) ? data.peers : [];
-  if (!data.enabled || (!data.self && !peers.length)) { wrap.hidden = true; return; }
+  const issue = tailnetIssue(data);
+  if (!data.enabled || (!data.self && !peers.length && !issue)) { wrap.hidden = true; return; }
   row.innerHTML = '';
   hint.hidden = true;
   hint.innerHTML = '';
@@ -117,7 +118,9 @@ async function loadMachines() {
   if (data.self && data.self.url) {
     const me = document.createElement('span');
     me.className = 'machine current';
+    if (issue) me.classList.add('unreachable');
     me.textContent = (data.self.dns || '').split('.')[0] || 'this';
+    if (issue) me.title = issue.message;
     const copy = document.createElement('button');
     copy.className = 'machine-copy';
     copy.title = 'Copy this machine’s share URL';
@@ -129,6 +132,12 @@ async function loadMachines() {
         .catch(() => {});
     });
     me.append(copy);
+    row.append(me);
+  } else if (issue) {
+    const me = document.createElement('span');
+    me.className = 'machine current unreachable';
+    me.textContent = 'this PC';
+    me.title = issue.message;
     row.append(me);
   }
 
@@ -147,7 +156,50 @@ async function loadMachines() {
       if (!ok) { a.classList.add('unreachable'); a.dataset.unreachable = '1'; }
     });
   }
+  if (issue) renderMachineHint(hint, issue.message, issue.command);
   wrap.hidden = false;
+}
+
+function tailnetIssue(data) {
+  const status = data.status || {};
+  if (status.present === false) {
+    return { message: 'Tailscale is not available to the webmux service.', command: null };
+  }
+  if (status.needsLogin || (status.backendState && status.backendState !== 'Running')) {
+    let reason = status.backendState ? `Tailscale is ${status.backendState}` : 'Tailscale is not connected';
+    if (status.keyExpired && status.keyExpiry) {
+      const expiry = new Date(status.keyExpiry);
+      reason = `Tailscale key expired ${Number.isNaN(expiry.getTime()) ? status.keyExpiry : expiry.toLocaleDateString()}`;
+    }
+    return { message: `${reason}. Log in again to share this machine.`, command: 'tailscale up' };
+  }
+  if (!data.self && data.port) {
+    return { message: 'This machine is not shared through Tailscale Serve yet.', command: `tailscale serve --bg ${data.port}` };
+  }
+  return null;
+}
+
+function renderMachineHint(hint, message, command) {
+  hint.innerHTML = '';
+  const msg = document.createElement('div');
+  msg.className = 'hint-msg';
+  msg.textContent = message;
+  hint.append(msg);
+  if (command) {
+    const code = document.createElement('code');
+    code.className = 'hint-cmd';
+    code.textContent = command;
+    const copy = document.createElement('button');
+    copy.className = 'btn';
+    copy.textContent = 'Copy command';
+    copy.addEventListener('click', () => {
+      navigator.clipboard?.writeText(command)
+        .then(() => { copy.textContent = 'Copied ✓'; setTimeout(() => { copy.textContent = 'Copy command'; }, 1300); })
+        .catch(() => {});
+    });
+    hint.append(code, copy);
+  }
+  hint.hidden = false;
 }
 
 // Reachable from the browser? no-cors fetch resolves (opaque) if the host
@@ -166,23 +218,7 @@ function probeReachable(url) {
 function showMachineHint(p) {
   const hint = $('machine-hint');
   const cmd = `echo '${p.ip} ${p.dns}' | sudo tee -a /etc/hosts`;
-  hint.innerHTML = '';
-  const msg = document.createElement('div');
-  msg.className = 'hint-msg';
-  msg.textContent = `“${p.name || p.dns}” won’t open from this device (Tailscale MagicDNS not resolving here). On this device, add it to /etc/hosts:`;
-  const code = document.createElement('code');
-  code.className = 'hint-cmd';
-  code.textContent = cmd;
-  const copy = document.createElement('button');
-  copy.className = 'btn';
-  copy.textContent = 'Copy command';
-  copy.addEventListener('click', () => {
-    navigator.clipboard?.writeText(cmd)
-      .then(() => { copy.textContent = 'Copied ✓'; setTimeout(() => { copy.textContent = 'Copy command'; }, 1300); })
-      .catch(() => {});
-  });
-  hint.append(msg, code, copy);
-  hint.hidden = false;
+  renderMachineHint(hint, `“${p.name || p.dns}” won’t open from this device (Tailscale MagicDNS not resolving here). On this device, add it to /etc/hosts:`, cmd);
 }
 
 // If there are no sessions, distinguish "nothing running" from "tmux not found".

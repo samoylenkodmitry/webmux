@@ -74,6 +74,31 @@ async function runTailscale(args) {
   return (await execFileP(bin, args, { encoding: 'utf8' })).stdout;
 }
 
+async function tailscaleStatus() {
+  try {
+    const status = JSON.parse(await runTailscale(['status', '--json', '--self=true']));
+    const self = status.Self || {};
+    const dns = (self.DNSName || '').replace(/\.$/, '');
+    const keyExpiry = self.KeyExpiry || '';
+    const expiryMs = keyExpiry ? Date.parse(keyExpiry) : NaN;
+    const keyExpired = Boolean(self.Expired) || (Number.isFinite(expiryMs) && expiryMs <= Date.now());
+    const backendState = status.BackendState || '';
+    return {
+      present: true,
+      backendState,
+      running: backendState === 'Running',
+      needsLogin: backendState === 'NeedsLogin' || keyExpired,
+      health: Array.isArray(status.Health) ? status.Health : [],
+      dns,
+      keyExpiry,
+      keyExpired,
+      magicDNSSuffix: status.MagicDNSSuffix || (status.CurrentTailnet && status.CurrentTailnet.MagicDNSSuffix) || '',
+    };
+  } catch (e) {
+    return { present: false, error: e.message || String(e) };
+  }
+}
+
 // Probe https://<dns>/api/health by connecting to the peer's Tailscale IP and
 // presenting the MagicDNS name via SNI + Host. The serve cert is issued for that
 // name, so TLS still validates — and it works even when *this* node's MagicDNS
@@ -117,8 +142,9 @@ async function tailscalePeers() {
   _peersCachePromise = (async () => {
     try {
       const status = JSON.parse(await runTailscale(['status', '--json']));
+      if (status.BackendState && status.BackendState !== 'Running') return [];
       const peers = Object.values(status.Peer || {})
-        .filter((p) => p.Online && p.DNSName && Array.isArray(p.TailscaleIPs) && p.TailscaleIPs.length)
+        .filter((p) => p.Online && !p.Expired && p.InNetworkMap !== false && p.DNSName && Array.isArray(p.TailscaleIPs) && p.TailscaleIPs.length)
         .map((p) => {
           const dns = p.DNSName.replace(/\.$/, '');
           const ip = p.TailscaleIPs.find((a) => a.includes('.')) || p.TailscaleIPs[0];
@@ -139,15 +165,12 @@ async function tailscalePeers() {
 // Best-effort lookup of this node's own tailnet HTTPS URL from `tailscale serve
 // status`. Returns { url, dns } when serve is configured for our port; null
 // otherwise (tailscale missing, not logged in, no serve config, etc.).
-async function tailscaleSelf() {
+async function tailscaleSelf(status = null) {
   try {
-    const [statusOut, serveOut] = await Promise.all([
-      runTailscale(['status', '--json', '--self=true']),
-      runTailscale(['serve', 'status', '--json']),
-    ]);
-    const status = JSON.parse(statusOut);
+    const ts = status || await tailscaleStatus();
+    const serveOut = await runTailscale(['serve', 'status', '--json']);
     const serve = JSON.parse(serveOut);
-    const dns = ((status.Self && status.Self.DNSName) || '').replace(/\.$/, '');
+    const dns = ts.dns || '';
     if (!dns || !serve.Web) return null;
     const localPort = String(PORT);
     for (const [hostPort, cfg] of Object.entries(serve.Web)) {
@@ -413,8 +436,9 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/tailnet') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
     if (!TAILSCALE_ENABLED) return sendJson(res, 200, { enabled: false, self: null, peers: [] });
-    const [self, peers] = await Promise.all([tailscaleSelf(), tailscalePeers()]);
-    return sendJson(res, 200, { enabled: true, self, peers });
+    const status = await tailscaleStatus();
+    const [self, peers] = await Promise.all([tailscaleSelf(status), status.running ? tailscalePeers() : []]);
+    return sendJson(res, 200, { enabled: true, port: PORT, status, self, peers });
   }
   if (url.pathname === '/api/recents') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });

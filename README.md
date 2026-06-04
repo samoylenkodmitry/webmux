@@ -51,7 +51,8 @@ curl -fsSL https://raw.githubusercontent.com/samoylenkodmitry/webmux/main/instal
 
 Installs a background service on `127.0.0.1:8083` (systemd user service on Linux, launchd agent on macOS). It's **interactive**: it offers to install `tmux` if missing, lets you choose which installed terminal **New** opens on the desktop, and can optionally auto-start tmux in new shells so terminals you open normally also appear in webmux. **Requires** Node ≥ 18, npm, and a C toolchain for the native PTY module (Linux: `base-devel`/`build-essential` + `python3`; macOS: Xcode Command Line Tools). Set `WEBMUX_NONINTERACTIVE=1` to accept defaults silently.
 
-Then expose it privately to your other devices:
+The installer can also configure the private Tailscale share for you. If you
+skip that prompt, expose it manually:
 
 ```sh
 tailscale serve --bg 8083
@@ -71,7 +72,7 @@ Environment variables (set in the generated service file or your shell):
 | `TERM_NAME` | `xterm-256color` | `TERM` for the PTY |
 | `TMUX_SOCKET` | — | target a specific `tmux -L <name>` server |
 | `WEBMUX_STATE` | `~/.local/state/webmux` | where recent-directory history is stored |
-| `WEBMUX_TAILSCALE` | unset | `1` shows this node's share URL + other tailnet webmux instances in the picker |
+| `WEBMUX_TAILSCALE` | unset | `1` shows this node's share state + other tailnet webmux instances in the picker |
 
 ## Run from source
 

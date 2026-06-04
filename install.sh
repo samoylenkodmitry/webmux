@@ -173,6 +173,63 @@ install_tailscale() {
     *) warn "See https://tailscale.com/download"; return 1 ;;
   esac
 }
+TAILSCALE_BIN=""
+resolve_tailscale() {
+  TAILSCALE_BIN="$(command -v tailscale 2>/dev/null || true)"
+  if [ -z "$TAILSCALE_BIN" ]; then
+    for c in "$HOME/.local/bin/tailscale" /opt/homebrew/bin/tailscale /usr/local/bin/tailscale /usr/bin/tailscale /Applications/Tailscale.app/Contents/MacOS/Tailscale; do
+      [ -x "$c" ] && { TAILSCALE_BIN="$c"; break; }
+    done
+  fi
+  return 0
+}
+tailscale_backend_state() {
+  [ -n "$TAILSCALE_BIN" ] || return 0
+  local out
+  out="$("$TAILSCALE_BIN" status --json 2>/dev/null || true)"
+  [ -n "$out" ] || return 0
+  printf '%s' "$out" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{try{process.stdout.write(JSON.parse(s).BackendState||"")}catch{}})'
+}
+tailscale_serve_has_port() {
+  [ -n "$TAILSCALE_BIN" ] || return 1
+  local out
+  out="$("$TAILSCALE_BIN" serve status --json 2>/dev/null || true)"
+  [ -n "$out" ] || return 1
+  printf '%s' "$out" | PORT="$PORT" node -e '
+let s = "";
+process.stdin.on("data", c => s += c);
+process.stdin.on("end", () => {
+  try {
+    const web = JSON.parse(s).Web || {};
+    for (const cfg of Object.values(web)) {
+      for (const h of Object.values((cfg && cfg.Handlers) || {})) {
+        const m = String((h && h.Proxy) || "").match(/:(\d+)(?:\/|$)/);
+        if (m && m[1] === String(process.env.PORT || "")) process.exit(0);
+      }
+    }
+  } catch {}
+  process.exit(1);
+})'
+}
+setup_tailscale_serve() {
+  [ -n "$TAILSCALE_BIN" ] || return 1
+  local state
+  state="$(tailscale_backend_state)"
+  if [ -n "$state" ] && [ "$state" != Running ]; then
+    warn "Tailscale is '$state' — log in with '$TAILSCALE_BIN up', then re-run this installer."
+    return 1
+  fi
+  if tailscale_serve_has_port; then
+    say "Tailscale Serve already points at webmux port $PORT"
+    return 0
+  fi
+  if "$TAILSCALE_BIN" serve --bg "$PORT"; then
+    say "Configured Tailscale Serve for webmux on port $PORT"
+    return 0
+  fi
+  warn "Could not configure Tailscale Serve. Try manually: $TAILSCALE_BIN serve --bg $PORT"
+  return 1
+}
 
 # --- locate or fetch the source ------------------------------------------
 SRC=""
@@ -216,10 +273,12 @@ if ask_yn "Make terminals you open normally show up in webmux too (auto-start tm
 fi
 
 # Tailscale: offer to install it for private remote access from your phone.
-if ! command -v tailscale >/dev/null 2>&1 && [ ! -d /Applications/Tailscale.app ]; then
+resolve_tailscale
+if [ -z "$TAILSCALE_BIN" ] && [ ! -d /Applications/Tailscale.app ]; then
   if ask_yn "Install Tailscale for private access from your phone? [y/N]" N; then
     if install_tailscale; then
-      say "Tailscale installed. Log in (open the app, or 'tailscale up'), then: tailscale serve --bg $PORT"
+      resolve_tailscale
+      say "Tailscale installed. Log in (open the app, or 'tailscale up'), then re-run this installer."
     else
       warn "Tailscale install didn't complete — see https://tailscale.com/download"
     fi
@@ -230,14 +289,14 @@ fi
 # `tailscale serve` URL in the picker (handy for opening webmux on your phone).
 # Opt-in keeps webmux from invoking `tailscale` for users who don't want it.
 WEBMUX_TAILSCALE_ENABLED=
-TAILSCALE_PRESENT=0
-for c in "$HOME/.local/bin/tailscale" /opt/homebrew/bin/tailscale /usr/local/bin/tailscale /Applications/Tailscale.app/Contents/MacOS/Tailscale; do
-  [ -x "$c" ] && TAILSCALE_PRESENT=1 && break
-done
-command -v tailscale >/dev/null 2>&1 && TAILSCALE_PRESENT=1
-if [ "$TAILSCALE_PRESENT" = 1 ]; then
+TAILSCALE_SERVE_CONFIGURED=0
+resolve_tailscale
+if [ -n "$TAILSCALE_BIN" ]; then
   if ask_yn "Show your Tailscale share URL (and other webmux instances on the tailnet) in the picker? [Y/n]" Y; then
     WEBMUX_TAILSCALE_ENABLED=1
+    if ask_yn "Configure Tailscale Serve for webmux now? [Y/n]" Y; then
+      setup_tailscale_serve && TAILSCALE_SERVE_CONFIGURED=1 || true
+    fi
   fi
 fi
 
@@ -324,8 +383,9 @@ RestartSec=2
 WantedBy=default.target
 EOF
       systemctl --user daemon-reload
-      systemctl --user enable --now "$APP.service"
-      say "systemd user service '$APP' enabled and started."
+      systemctl --user enable "$APP.service"
+      systemctl --user restart "$APP.service"
+      say "systemd user service '$APP' enabled and restarted."
       echo "   manage: systemctl --user {status,restart,stop} $APP   logs: journalctl --user -u $APP -f"
     else
       MANUAL=1
@@ -369,7 +429,16 @@ fi
 cat <<EOF
 
 $APP is up on http://$HOST:$PORT
+EOF
+if [ "$TAILSCALE_SERVE_CONFIGURED" = 1 ]; then
+  cat <<EOF
+Tailscale Serve is configured. Check the share URL with:
+   tailscale serve status
+EOF
+else
+  cat <<EOF
 Expose it to your other devices (recommended: Tailscale, keeps it private):
    tailscale serve --bg $PORT
 Then open the printed https URL on your phone and "Add to Home Screen".
 EOF
+fi
