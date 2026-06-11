@@ -213,14 +213,58 @@ function desktopLaunchSpec(name) {
   return [DESKTOP_TERMINAL, ['-e', ...run]]; // ghostty/kitty/alacritty/foot/konsole/xterm
 }
 
+// A background user service (systemd/launchd) starts without the graphical
+// session's env — so it has no DISPLAY/WAYLAND_DISPLAY/DBUS address and any GUI
+// terminal it spawns can't reach the display and dies silently. The desktop
+// imports those vars into the systemd *user manager* on login, so read them back
+// from there at spawn time (always current, never hardcoded) and pass them to
+// the child. Linux-only: macOS launches GUI apps via open/osascript without these.
+const GRAPHICAL_VARS = [
+  'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS',
+  'XDG_RUNTIME_DIR', 'XDG_SESSION_TYPE', 'XDG_CURRENT_DESKTOP', 'XDG_SESSION_DESKTOP',
+];
+const GRAPHICAL_ENV_TTL = 5000;
+let _graphicalEnvPromise = null;
+let _graphicalEnvStamp = 0;
+function graphicalEnv() {
+  if (process.platform !== 'linux') return Promise.resolve({});
+  const now = Date.now();
+  if (_graphicalEnvPromise && now - _graphicalEnvStamp < GRAPHICAL_ENV_TTL) return _graphicalEnvPromise;
+  _graphicalEnvStamp = now;
+  _graphicalEnvPromise = (async () => {
+    try {
+      // `systemctl --user` reaches the manager over $XDG_RUNTIME_DIR (no DISPLAY
+      // needed), so this works even though our own process lacks the GUI env.
+      const { stdout } = await execFileP('systemctl', ['--user', 'show-environment'], { encoding: 'utf8' });
+      const env = {};
+      for (const line of stdout.split('\n')) {
+        const eq = line.indexOf('=');
+        if (eq <= 0) continue;
+        const key = line.slice(0, eq);
+        if (!GRAPHICAL_VARS.includes(key)) continue;
+        let val = line.slice(eq + 1);
+        if (val.length >= 2 && val.startsWith('"') && val.endsWith('"')) {
+          val = val.slice(1, -1).replace(/\\(["\\])/g, '$1'); // systemd quotes only when needed
+        }
+        if (val) env[key] = val;
+      }
+      return env;
+    } catch {
+      return {}; // no user manager / systemctl: fall back to process.env
+    }
+  })();
+  return _graphicalEnvPromise;
+}
+
 // Open a real terminal window on the PC attached to the tmux session, so it is
 // visible locally and (being a second client) outlives the browser. Best-effort:
 // if there's no display or the emulator is missing, the web session still works.
-function launchDesktop(name) {
+async function launchDesktop(name) {
   const [cmd, args] = desktopLaunchSpec(name);
+  const env = { ...process.env, ...(await graphicalEnv()) };
   try {
-    const child = spawn(cmd, args, { detached: true, stdio: 'ignore', env: process.env });
-    child.on('error', () => {}); // emulator missing / no DISPLAY: ignore
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore', env });
+    child.on('error', () => {}); // emulator missing / no display: ignore
     child.unref();
   } catch { /* ignore */ }
 }
@@ -480,7 +524,7 @@ const server = http.createServer(async (req, res) => {
     try {
       await tmux(['has-session', '-t', `=${name}`]); // throws if missing
       await ensureTmuxMouse();
-      launchDesktop(name);
+      await launchDesktop(name);
       return sendJson(res, 200, { ok: true });
     } catch {
       return sendJson(res, 404, { error: 'session not found' });

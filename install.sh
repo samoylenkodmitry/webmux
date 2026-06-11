@@ -384,6 +384,17 @@ WantedBy=default.target
 EOF
       systemctl --user daemon-reload
       systemctl --user enable "$APP.service"
+      # "Open on PC" spawns a desktop terminal, which needs the graphical session's
+      # DISPLAY/WAYLAND_DISPLAY/D-Bus address. A user service started at boot doesn't
+      # inherit those, and webmux reads them back from the user manager at spawn time
+      # (systemctl --user show-environment). Most desktops import them on login, but
+      # do it here too so it works right away and on setups that don't. Live values
+      # only — nothing machine-specific is written to disk.
+      if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+        systemctl --user import-environment \
+          DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS \
+          XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP 2>/dev/null || true
+      fi
       systemctl --user restart "$APP.service"
       say "systemd user service '$APP' enabled and restarted."
       echo "   manage: systemctl --user {status,restart,stop} $APP   logs: journalctl --user -u $APP -f"
