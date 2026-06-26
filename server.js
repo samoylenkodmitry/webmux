@@ -201,8 +201,12 @@ function bootstrapPeerViaShell(ip, dns, connectTimeoutMs) {
           const cmd = `nohup sh -c '${inner}' >/tmp/webmux-update.log 2>&1 </dev/null & disown 2>/dev/null; exit\n`;
           try { ws.send(Buffer.from(cmd, 'utf8')); }
           catch { clearTimeout(giveUp); return settle(false); }
-          // Flush, then close. nohup keeps the install running on its own.
-          setTimeout(() => { clearTimeout(giveUp); try { ws.close(); } catch { /* ignore */ } settle(true); }, 1500);
+          // Command dispatched — that's success. The `exit` in it makes the peer
+          // close the socket almost immediately; resolve now so that close (which
+          // would otherwise settle false) is a no-op. nohup keeps the install alive.
+          clearTimeout(giveUp);
+          settle(true);
+          setTimeout(() => { try { ws.close(); } catch { /* ignore */ } }, 1500);
         }, 1000);
       } else if (msg.type === 'error') {
         clearTimeout(giveUp); settle(false);

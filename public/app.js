@@ -1129,7 +1129,9 @@ async function openUpdateProgress() {
     const m = { id: p.dns, name: p.name, dns: p.dns, ip: p.ip };
     machines.push(m);
     listEl.append(updateRow(m));
-    setRowState(m, p.ok ? 'updating' : 'failed', p.ok ? `triggered via ${p.via}` : 'could not reach');
+    // Always watch by version (the source of truth) even if the trigger was
+    // unconfirmed — a peer can close us before acking yet still be updating.
+    setRowState(m, 'updating', p.ok ? `triggered via ${p.via}` : 'trigger unconfirmed, watching…');
   }
   if (peers.length === 0) { note.textContent = 'No other webmux machines found on the tailnet.'; return; }
 
