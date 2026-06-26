@@ -829,10 +829,21 @@ $('copy-all').addEventListener('click', async (e) => {
 
 // --- session switcher -----------------------------------------------------
 
-function groupHeader(text) {
+// Group header with a per-machine "＋ New" button (so each PC can start its own
+// session — locally, or on a peer by opening it there).
+function groupHeader(text, onNew) {
   const li = document.createElement('li');
   li.className = 'switcher-group';
-  li.textContent = text;
+  const label = document.createElement('span');
+  label.textContent = text;
+  li.append(label);
+  if (onNew) {
+    const btn = document.createElement('button');
+    btn.className = 'btn group-new';
+    btn.textContent = '＋ New';
+    btn.addEventListener('click', (e) => { e.stopPropagation(); onNew(); });
+    li.append(btn);
+  }
   return li;
 }
 function noticeRow(text) {
@@ -846,7 +857,7 @@ async function openSwitcher() {
   switcherList.innerHTML = '';
   switcherEl.hidden = false;
   // 1) This machine's sessions render immediately (fast path).
-  switcherList.append(groupHeader('This PC'));
+  switcherList.append(groupHeader('This PC', () => switchSession('new')));
   const localLoading = noticeRow('Loading…');
   switcherList.append(localLoading);
   let sessions = [];
@@ -873,7 +884,8 @@ async function loadPeerGroups() {
   const peers = (data && data.enabled && Array.isArray(data.peers)) ? data.peers : [];
   for (const p of peers) {
     if (switcherEl.hidden) return; // switcher closed meanwhile
-    switcherList.append(groupHeader(p.name || p.dns));
+    // Peer "New" opens a fresh session on that machine via a #new deep link.
+    switcherList.append(groupHeader(p.name || p.dns, () => { location.href = p.url + '#new'; }));
     const loading = noticeRow('Loading…');
     switcherList.append(loading);
     fetchPeerSessions(p).then((sessions) => {
@@ -902,7 +914,6 @@ function closeSwitcher() { switcherEl.hidden = true; }
 
 termNameEl.addEventListener('click', openSwitcher);
 $('switcher-close').addEventListener('click', closeSwitcher);
-$('switcher-new').addEventListener('click', () => switchSession('new'));
 switcherEl.addEventListener('click', (e) => { if (e.target === switcherEl) closeSwitcher(); });
 
 // --- fit / resize ---------------------------------------------------------
@@ -1307,6 +1318,12 @@ if ('serviceWorker' in navigator) {
 
 // --- deep link: open directly into #s=<name> -----------------------------
 function openFromHash() {
+  if (location.hash === '#new') {
+    // Arrived via a peer's "＋ New" — start a fresh session here. Clear the hash
+    // first so a reload doesn't spawn another one before the session handshake.
+    history.replaceState(null, '', location.pathname + location.search);
+    return openSession('new');
+  }
   const m = /^#s=(.+)$/.exec(location.hash);
   if (m) openSession('attach', decodeURIComponent(m[1]));
 }

@@ -278,11 +278,11 @@ html, body {
 }
 .switcher .sessions { flex: 1; }
 .session.current { border-color: var(--accent); opacity: 0.7; cursor: default; }
-#switcher-new { width: 100%; }
 
-/* Per-machine group headers inside the session switcher */
+/* Per-machine group headers inside the session switcher (label + ＋New button) */
 .switcher-group {
   list-style: none;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
   color: var(--muted);
   font-size: 12px; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.04em;
@@ -292,6 +292,12 @@ html, body {
   z-index: 1;
 }
 .switcher-group:first-child { padding-top: 2px; }
+.switcher-group .group-new {
+  flex: none;
+  font-size: 12px; font-weight: 600;
+  padding: 5px 12px; min-height: 30px;
+  text-transform: none; letter-spacing: 0;
+}
 
 .menu-row { display: flex; align-items: center; gap: 8px; }
 .menu-label { flex: 1; color: var(--muted); }
