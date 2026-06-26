@@ -328,14 +328,15 @@ function sessionItem(s, { current = false, onClick } = {}) {
   const name = document.createElement('div');
   name.className = 'name';
   name.textContent = s.name;
-  const sub = document.createElement('div');
-  sub.className = 'sub';
-  const cmd = document.createElement('span');
+  // Command on its own line (it can be a long full argv now, e.g. "sudo btop")
+  // so it isn't squeezed/trimmed next to the path on a narrow phone screen.
+  const cmd = document.createElement('div');
   cmd.className = 'cmd';
   cmd.textContent = s.command || 'shell';
-  sub.append(cmd, document.createTextNode('  ·  ' + (s.path || '') +
-    (s.windows > 1 ? `  ·  ${s.windows} windows` : '')));
-  meta.append(name, sub);
+  const sub = document.createElement('div');
+  sub.className = 'sub';
+  sub.textContent = (s.path || '') + (s.windows > 1 ? `  ·  ${s.windows} windows` : '');
+  meta.append(name, cmd, sub);
 
   const badge = document.createElement('span');
   badge.className = 'badge' + (s.attached > 0 ? ' live' : '');

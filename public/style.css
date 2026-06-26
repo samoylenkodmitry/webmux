@@ -110,8 +110,17 @@ html, body {
 .session:active { border-color: var(--accent); }
 .session .meta { flex: 1; min-width: 0; }
 .session .name { font-weight: 600; font-size: 16px; }
-.session .sub { color: var(--muted); font-size: 13px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.session .cmd { color: var(--accent); }
+/* Command on its own line: full width, wraps to at most 2 lines instead of being
+   trimmed against the path on a narrow screen. */
+.session .cmd {
+  color: var(--accent);
+  font-size: 13px; margin-top: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.session .sub { color: var(--muted); font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session .sub:empty { display: none; }
 .session .badge {
   flex: none;
   font-size: 12px;
