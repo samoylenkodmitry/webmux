@@ -1,7 +1,7 @@
 // App-shell service worker: network-first with a cache fallback. On the tailnet
 // you always get fresh assets; offline (or server down) the shell still loads.
 // Bump CACHE to force old caches out after asset changes.
-const CACHE = 'ptw-v12';
+const CACHE = 'ptw-v13';
 const SHELL = [
   '/', '/index.html', '/app.js', '/style.css',
   '/vendor/xterm.js', '/vendor/xterm.css', '/vendor/addon-fit.js',

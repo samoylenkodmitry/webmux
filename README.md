@@ -31,7 +31,10 @@ Rendered with [xterm.js](https://xtermjs.org/); the backend bridges a WebSocket 
 - **New sessions also open a real terminal window on your PC** and persist after the browser leaves — so they stay visible locally and you can always return to them.
 - **Recent directories:** when a session closes, its directory is remembered so you can start a fresh terminal there in one tap.
 - **Live title:** the bar (and tab) shows the session's current command + directory.
-- **Multiple machines:** optionally discovers other webmux instances on your [Tailscale](https://tailscale.com) tailnet and shows them as a row you can switch between — one app for all your boxes.
+- **Multiple machines:** optionally discovers other webmux instances on your [Tailscale](https://tailscale.com) tailnet and shows them as a row you can switch between — one app for all your boxes. The session switcher also lists **every machine's sessions, grouped by box** (each peer streams in as it answers, so your own appear instantly).
+- **Compose bar:** a ✎ toggle opens a plain text field to type into and **Send** to the terminal — mobile keyboards' predictive text / T9 work there without the character-doubling that direct in-terminal typing can cause. Plus **Undo** (erase exactly what you last typed) and **Clr Ln** (^U) soft-keys.
+- **One-tap update:** a menu button runs the installer one-liner on this PC **and every webmux box on your tailnet**, inside a tmux session you watch live as it self-updates and restarts.
+- **Per-terminal font size:** each session remembers its own zoom.
 
 ## Why (the workflow)
 
@@ -91,7 +94,8 @@ webmux has **no authentication** — anyone who can reach the port gets a shell 
 - **Linux & macOS** supported (open-on-PC uses Ghostty on Linux, Terminal.app/iTerm/Ghostty on macOS via your installer choice). **Windows:** run under WSL (Linux from there).
 - "Open on PC" is best-effort; with no display it falls back to a browser-only session.
 - Opening a peer's `…ts.net` URL from a desktop needs Tailscale MagicDNS working there; if it doesn't, the picker shows a one-line `/etc/hosts` workaround for that peer.
-- HTTP API: `/api/sessions`, `/api/session`, `/api/recents`, `/api/capture`, `/api/windows`, `/api/open`, `/api/kill`, `/api/tailnet`, `/api/health`; WebSocket at `/ws/session/<name>` and `/ws/new`. See [`server.js`](server.js).
+- HTTP API: `/api/sessions`, `/api/session`, `/api/recents`, `/api/capture`, `/api/windows`, `/api/open`, `/api/kill`, `/api/update`, `/api/peer/sessions`, `/api/tailnet`, `/api/health`; WebSocket at `/ws/session/<name>` and `/ws/new`. See [`server.js`](server.js).
+- The **all-PCs update** only reaches peers that already run this version (it POSTs `/api/update` to each); update a box once the normal way and thereafter it joins the one-tap fleet update.
 
 ## License
 MIT

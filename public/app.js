@@ -24,6 +24,8 @@ const copyTextEl = $('copy-text');
 const windowsEl = $('windows');
 const windowsList = $('windows-list');
 const confirmEl = $('confirm');
+const composeEl = $('compose');
+const composeInput = $('compose-input');
 
 // --- terminal session state ----------------------------------------------
 let term = null;
@@ -56,6 +58,8 @@ const KEYS = [
   { label: 'Ctrl', mod: 'ctrl' },
   { label: '^C', ctrlKey: 'c' },
   { label: '⏎', seq: '\r' },
+  { label: 'Undo', undo: true },     // erase exactly what was last typed/sent
+  { label: 'ClrLn', clearLine: true }, // wipe the whole current input line (^U)
   { label: '|', seq: '|' },
   { label: '~', seq: '~' },
   { label: '-', seq: '-' },
@@ -307,14 +311,37 @@ $('new').addEventListener('click', () => openSession('new'));
 
 // =====================  Terminal  ========================================
 
-let fontSize = clampFont(parseInt(localStorage.getItem('ptw-font') || '14', 10));
+// Font size is remembered per session (keyed by tmux name) so each terminal keeps
+// its own zoom; brand-new/unknown sessions fall back to the last-used global size.
 function clampFont(px) { return Math.max(4, Math.min(28, Number.isFinite(px) ? px : 14)); }
-function setFontSize(px) {
+const FONT_MAP_KEY = 'ptw-font-by-session';
+function globalDefaultFont() { return clampFont(parseInt(localStorage.getItem('ptw-font') || '14', 10)); }
+function loadFontMap() { try { return JSON.parse(localStorage.getItem(FONT_MAP_KEY)) || {}; } catch { return {}; } }
+function saveSessionFont(name, px) {
+  if (!name) return;
+  const m = loadFontMap();
+  m[name] = px;
+  try { localStorage.setItem(FONT_MAP_KEY, JSON.stringify(m)); } catch { /* quota: ignore */ }
+}
+
+let fontSize = globalDefaultFont();
+// Apply a size to the live terminal + menu readout, without persisting it.
+function applyFont(px) {
   fontSize = clampFont(px);
-  localStorage.setItem('ptw-font', String(fontSize));
   const val = $('font-val');
   if (val) val.textContent = String(fontSize);
   if (term) { term.options.fontSize = fontSize; doFit(); }
+}
+// User-initiated change: apply, then remember it both globally and per session.
+function setFontSize(px) {
+  applyFont(px);
+  try { localStorage.setItem('ptw-font', String(fontSize)); } catch { /* ignore */ }
+  saveSessionFont(currentName, fontSize);
+}
+// On (re)attach: restore this session's remembered size, else the global default.
+function applySessionFont(name) {
+  const m = loadFontMap();
+  applyFont(Number.isFinite(m[name]) ? m[name] : globalDefaultFont());
 }
 
 function ensureTerm() {
@@ -401,8 +428,25 @@ function renderKeys() {
 }
 
 function handleKey(k) {
+  if (navigator.vibrate) { try { navigator.vibrate(8); } catch { /* unsupported */ } }
   if (k.mod) toggleMod(k.mod);
   else pressKey(k);
+}
+
+// Track the most recent run of printable input (from typing or the compose bar)
+// so "Undo" can erase exactly it. Any control byte (Enter, arrows, ^C, …) is a
+// boundary that resets the buffer, so Undo never deletes across a submitted line.
+let lastInput = '';
+function noteInput(text) {
+  if (!text) return;
+  if (/[\x00-\x1f\x7f]/.test(text)) { lastInput = ''; return; }
+  lastInput = (lastInput + text).slice(-4096);
+}
+function undoLastInput() {
+  if (!lastInput) return;
+  const n = [...lastInput].length; // count code points (approx for wide chars)
+  sendBytes('\x7f'.repeat(n));      // DEL/backspace ×N
+  lastInput = '';
 }
 
 // Container-level pointer handling. preventDefault on pointerdown stops focus
@@ -437,7 +481,7 @@ function setupKeyBar() {
     try { keysEl.releasePointerCapture(id); } catch { /* ignore */ }
     if (!moved) {
       const key = keyAt(e.clientX, e.clientY);
-      if (key && key._key) { handleKey(key._key); if (term) term.focus(); }
+      if (key && key._key) { handleKey(key._key); focusActiveInput(); }
     }
     setPressed(null);
     id = null;
@@ -470,6 +514,8 @@ function modNumber() {
 // A soft special key (cursor / nav / function / tab / literal symbol).
 function pressKey(k) {
   ensureBottom();
+  if (k.undo) { undoLastInput(); clearMods(); return; }
+  if (k.clearLine) { sendBytes('\x15'); lastInput = ''; clearMods(); return; } // ^U kills the line
   const mod = modNumber();
   let out;
   if (k.ctrlKey) {
@@ -519,15 +565,17 @@ function onTermInput(data) {
   // Big chunk = a paste: confirm first. Nothing forwards to the PTY except
   // sendBytes, so deferring it behind the async dialog is safe.
   if (data.length > PASTE_WARN) {
-    confirmLarge(data).then((ok) => { if (ok) { ensureBottom(); sendBytes(data); } });
+    confirmLarge(data).then((ok) => { if (ok) { ensureBottom(); lastInput = ''; sendBytes(data); } });
     return;
   }
   ensureBottom(); // a keystroke means "go live"
   if (data.length === 1 && (shiftArmed || ctrlArmed || altArmed)) {
     const out = applyMods(data);
     clearMods();
+    noteInput(out);
     return sendBytes(out);
   }
+  noteInput(data);
   sendBytes(data);
 }
 
@@ -657,6 +705,7 @@ function onControl(msg) {
     case 'session':
       currentName = msg.name;
       termTitleEl.textContent = msg.name;
+      applySessionFont(msg.name); // each terminal remembers its own zoom
       history.replaceState(null, '', '#s=' + encodeURIComponent(msg.name)); // bookmarkable
       refreshTitle();
       break;
@@ -685,6 +734,7 @@ function backToPicker() {
   closeSwitcher();
   closeMenu();
   closeWindows();
+  closeCompose();
   resolveConfirm(false);
   copyViewEl.hidden = true;
   clearMods();
@@ -778,22 +828,74 @@ $('copy-all').addEventListener('click', async (e) => {
 
 // --- session switcher -----------------------------------------------------
 
+function groupHeader(text) {
+  const li = document.createElement('li');
+  li.className = 'switcher-group';
+  li.textContent = text;
+  return li;
+}
+function noticeRow(text) {
+  const li = document.createElement('li');
+  li.className = 'empty';
+  li.textContent = text;
+  return li;
+}
+
 async function openSwitcher() {
-  switcherList.innerHTML = '<li class="empty">Loading…</li>';
+  switcherList.innerHTML = '';
   switcherEl.hidden = false;
+  // 1) This machine's sessions render immediately (fast path).
+  switcherList.append(groupHeader('This PC'));
+  const localLoading = noticeRow('Loading…');
+  switcherList.append(localLoading);
   let sessions = [];
   try { sessions = await fetchSessions(); } catch { /* show empty */ }
-  switcherList.innerHTML = '';
-  if (!sessions.length) {
-    switcherList.innerHTML = '<li class="empty">No sessions</li>';
-    return;
-  }
+  localLoading.remove();
+  if (!sessions.length) switcherList.append(noticeRow('No sessions'));
   for (const s of sessions) {
     switcherList.append(sessionItem(s, {
       current: s.name === currentName,
       onClick: () => switchSession('attach', s.name),
     }));
   }
+  // 2) Other machines stream in afterwards, each under its own header.
+  loadPeerGroups();
+}
+
+// Fetch peers, then for each append a header + loading row and resolve its
+// sessions independently. Each peer's rows are inserted right before its own
+// loading anchor, so concurrent loads stay grouped under the correct header.
+async function loadPeerGroups() {
+  let data;
+  try { data = await (await fetch('/api/tailnet', { cache: 'no-store' })).json(); }
+  catch { return; }
+  const peers = (data && data.enabled && Array.isArray(data.peers)) ? data.peers : [];
+  for (const p of peers) {
+    if (switcherEl.hidden) return; // switcher closed meanwhile
+    switcherList.append(groupHeader(p.name || p.dns));
+    const loading = noticeRow('Loading…');
+    switcherList.append(loading);
+    fetchPeerSessions(p).then((sessions) => {
+      if (switcherEl.hidden || !loading.isConnected) return;
+      const frag = document.createDocumentFragment();
+      if (!sessions.length) frag.append(noticeRow('No sessions'));
+      for (const s of sessions) {
+        frag.append(sessionItem(s, {
+          onClick: () => { location.href = p.url + '#s=' + encodeURIComponent(s.name); },
+        }));
+      }
+      switcherList.insertBefore(frag, loading);
+      loading.remove();
+    });
+  }
+}
+
+async function fetchPeerSessions(peer) {
+  try {
+    const res = await fetch(`/api/peer/sessions?dns=${encodeURIComponent(peer.dns)}&ip=${encodeURIComponent(peer.ip)}`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    return (await res.json()).sessions || [];
+  } catch { return []; }
 }
 function closeSwitcher() { switcherEl.hidden = true; }
 
@@ -845,7 +947,57 @@ $('kbd').addEventListener('click', () => {
   if (!term) return;
   const ta = termContainer.querySelector('.xterm-helper-textarea');
   if (ta && document.activeElement === ta) ta.blur();
-  else term.focus();
+  else focusActiveInput();
+});
+
+// --- compose bar: reliable mobile text entry ------------------------------
+// Typing directly into xterm routes through the browser IME, and some mobile
+// keyboards (T9 / predictive text) double characters that way. The compose bar is
+// a plain textarea where that never happens: type (suggestions work), optionally
+// edit, then Send pushes the text to the PTY in one shot.
+let composeOpen = false;
+function focusActiveInput() {
+  if (composeOpen) composeInput.focus();
+  else if (term) term.focus();
+}
+function autosizeCompose() {
+  composeInput.style.height = 'auto';
+  composeInput.style.height = Math.min(composeInput.scrollHeight, 120) + 'px';
+}
+function openCompose() {
+  composeOpen = true;
+  composeEl.hidden = false;
+  $('compose-btn').classList.add('armed');
+  autosizeCompose();
+  scheduleFit();
+  composeInput.focus();
+}
+function closeCompose() {
+  composeOpen = false;
+  composeEl.hidden = true;
+  $('compose-btn').classList.remove('armed');
+  scheduleFit();
+  if (term) term.focus();
+}
+function toggleCompose() { if (composeOpen) closeCompose(); else openCompose(); }
+
+// Push the composed text to the terminal. withEnter also submits the line.
+function sendCompose(withEnter) {
+  const text = composeInput.value;
+  if (text) { ensureBottom(); noteInput(text); sendBytes(text); }
+  if (withEnter) { ensureBottom(); sendBytes('\r'); lastInput = ''; }
+  composeInput.value = '';
+  autosizeCompose();
+  composeInput.focus(); // keep the keyboard up for the next line
+}
+
+$('compose-btn').addEventListener('click', toggleCompose);
+$('compose-send').addEventListener('click', () => sendCompose(false));
+$('compose-go').addEventListener('click', () => sendCompose(true));
+composeInput.addEventListener('input', autosizeCompose);
+composeInput.addEventListener('keydown', (e) => {
+  // Enter submits (send + Enter); Shift+Enter inserts a newline for multi-line.
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendCompose(true); }
 });
 
 $('paste').addEventListener('click', async () => {
@@ -884,6 +1036,42 @@ $('menu-reconnect').addEventListener('click', () => {
   closeMenu();
   reconnectNow();
   if (term) term.focus();
+});
+
+function overlayBriefly(text, ms = 1800) {
+  overlayText.textContent = text;
+  overlay.hidden = false;
+  setTimeout(() => { overlay.hidden = true; }, ms);
+}
+
+// Self-update every webmux box on the tailnet. The server launches the installer
+// one-liner in a `webmux-update` tmux session on each machine; we then attach to
+// THIS machine's so the user can watch it update + restart live.
+$('menu-update').addEventListener('click', async () => {
+  const ok = await askConfirm({
+    title: 'Update webmux',
+    message: 'Run the installer on this PC and every webmux machine on your tailnet, then restart each service? You’ll watch this PC update live.',
+    okLabel: 'Update all',
+  });
+  if (!ok) return;
+  closeMenu();
+  let session = 'webmux-update';
+  let peers = [];
+  try {
+    const res = await fetch('/api/update?scope=all', { method: 'POST' });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || 'update failed');
+    if (j.session) session = j.session;
+    peers = Array.isArray(j.peers) ? j.peers : [];
+  } catch (e) {
+    overlayBriefly('Could not start update: ' + (e.message || e), 2400);
+    return;
+  }
+  if (peers.length) {
+    const okPeers = peers.filter((p) => p.ok).length;
+    overlayBriefly(`Updating this PC + ${okPeers}/${peers.length} peer(s)…`, 1600);
+  }
+  switchSession('attach', session); // watch this machine update in real time
 });
 
 $('menu-windows').addEventListener('click', () => { closeMenu(); openWindows(); });

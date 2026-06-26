@@ -40,6 +40,12 @@ const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
 // e.g. ghostty/kitty/alacritty/xterm). If unset, a per-OS default is used.
 const DESKTOP_TERMINAL = process.env.DESKTOP_TERMINAL || '';
 
+// The published installer one-liner (see README). The "Update" button runs this
+// inside a visible tmux session so the user can watch the box self-update and the
+// service restart. Overridable for forks/testing.
+const INSTALL_URL = process.env.WEBMUX_INSTALL_URL || 'https://raw.githubusercontent.com/samoylenkodmitry/webmux/main/install.sh';
+const UPDATE_SESSION = 'webmux-update';
+
 // Tailscale UI integration is opt-in via the installer; the env var also acts
 // as a hard kill-switch when users don't want webmux invoking `tailscale` at all.
 const TAILSCALE_ENABLED = process.env.WEBMUX_TAILSCALE === '1';
@@ -125,6 +131,43 @@ function probeWebmuxHealth(ip, dns, timeoutMs) {
     );
     req.on('error', () => finish(null));
     req.on('timeout', () => { req.destroy(); finish(null); });
+    req.end();
+  });
+}
+
+// GET https://<dns><path> from a tailnet peer by dialing its IP with SNI + Host
+// (same trick as probeWebmuxHealth above), returning parsed JSON or null. Used to
+// pull a peer's session list so the picker can group sessions by machine.
+function fetchPeerJson(ip, dns, reqPath, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const req = https.request(
+      { host: ip, port: 443, servername: dns, path: reqPath, method: 'GET', headers: { Host: dns }, timeout: timeoutMs },
+      (res) => {
+        if (res.statusCode !== 200) { res.resume(); return finish(null); }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { body += c; if (body.length > 1_000_000) req.destroy(); });
+        res.on('end', () => { try { finish(JSON.parse(body)); } catch { finish(null); } });
+      }
+    );
+    req.on('error', () => finish(null));
+    req.on('timeout', () => { req.destroy(); finish(null); });
+    req.end();
+  });
+}
+
+// POST https://<dns>/api/update on a peer to ask it to self-update. Best-effort:
+// resolves true if the peer accepted. Same SNI + Host dialing as the GET helper.
+function postPeerUpdate(ip, dns, timeoutMs) {
+  return new Promise((resolve) => {
+    const req = https.request(
+      { host: ip, port: 443, servername: dns, path: '/api/update', method: 'POST', headers: { Host: dns, 'Content-Length': 0 }, timeout: timeoutMs },
+      (res) => { res.resume(); resolve(res.statusCode === 200); }
+    );
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
     req.end();
   });
 }
@@ -267,6 +310,24 @@ async function launchDesktop(name) {
     child.on('error', () => {}); // emulator missing / no display: ignore
     child.unref();
   } catch { /* ignore */ }
+}
+
+// Run the published installer one-liner inside a fresh `webmux-update` tmux
+// session so the user can attach and watch the box self-update + restart. The
+// session lives on webmux's own tmux server (shows up in the picker), runs
+// non-interactively so it never blocks on a prompt, and drops to a shell after so
+// the result stays visible. The tmux process is independent of this Node server,
+// so the install's `systemctl restart` doesn't kill the update mid-run.
+async function startUpdateSession() {
+  try { await tmux(['kill-session', '-t', `=${UPDATE_SESSION}`]); } catch { /* none running yet */ }
+  const script =
+    "clear 2>/dev/null; printf '\\033[1m== webmux update ==\\033[0m\\n'; " +
+    'WEBMUX_NONINTERACTIVE=1 curl -fsSL ' + INSTALL_URL + ' | bash; ' +
+    'code=$?; printf \'\\n== update finished (exit %s) -- this shell stays open ==\\n\' "$code"; ' +
+    'exec "${SHELL:-/bin/sh}"';
+  await tmux(['new-session', '-d', '-s', UPDATE_SESSION, script]);
+  // Survive having no client attached (e.g. while the service restarts).
+  try { await tmux(['set-option', '-t', UPDATE_SESSION, 'destroy-unattached', 'off']); } catch { /* best effort */ }
 }
 
 const HOST = process.env.HOST || '127.0.0.1';
@@ -483,6 +544,38 @@ const server = http.createServer(async (req, res) => {
     const status = await tailscaleStatus();
     const [self, peers] = await Promise.all([tailscaleSelf(status), status.running ? tailscalePeers() : []]);
     return sendJson(res, 200, { enabled: true, port: PORT, status, self, peers });
+  }
+  if (url.pathname === '/api/peer/sessions') {
+    // Proxy a peer's session list so the picker can group sessions by machine
+    // without the browser hitting cross-origin CORS. Only proxies to hosts that
+    // are *currently discovered* webmux peers — not an open relay.
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+    if (!TAILSCALE_ENABLED) return sendJson(res, 200, { sessions: [] });
+    const dns = url.searchParams.get('dns') || '';
+    const ip = url.searchParams.get('ip') || '';
+    const peers = await tailscalePeers();
+    const match = peers.find((p) => p.dns === dns && p.ip === ip);
+    if (!match) return sendJson(res, 404, { error: 'unknown peer' });
+    const data = await fetchPeerJson(ip, dns, '/api/sessions', 4000);
+    return sendJson(res, 200, { sessions: (data && data.sessions) || [] });
+  }
+  if (url.pathname === '/api/update') {
+    // Self-update: launch the installer one-liner in a watchable tmux session.
+    // scope=all also asks every discovered tailnet peer to update itself (peers
+    // get the default scope=self, so there's no fan-out loop).
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+    const scope = url.searchParams.get('scope') || 'self';
+    try { await startUpdateSession(); }
+    catch (e) { return sendJson(res, 500, { error: 'could not start update: ' + (e.message || e) }); }
+    let peers = [];
+    if (scope === 'all' && TAILSCALE_ENABLED) {
+      try {
+        const status = await tailscaleStatus();
+        const list = status.running ? await tailscalePeers() : [];
+        peers = await Promise.all(list.map(async (p) => ({ name: p.name, dns: p.dns, ok: await postPeerUpdate(p.ip, p.dns, 8000) })));
+      } catch { /* peer fan-out is best-effort */ }
+    }
+    return sendJson(res, 200, { ok: true, session: UPDATE_SESSION, peers });
   }
   if (url.pathname === '/api/recents') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
