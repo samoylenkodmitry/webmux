@@ -103,9 +103,56 @@ async function loadSessions() {
   loadMachines();
 }
 
-// A single row of webmux instances on the tailnet: this machine (marked) + peers.
-// Tapping a peer switches to it in the SAME tab (no new tab). If a peer can't be
-// reached from this device (no MagicDNS), tapping shows an /etc/hosts hint.
+// Live machine-stats wired up by loadMachines: each entry points a stats <span>
+// at a /api/stats (self) or /api/peer/stats (peer) URL, refreshed on a timer.
+let machineStatsTargets = [];
+let statsTimer = null;
+function fmtBytes(n) {
+  if (n == null) return '?';
+  if (n >= 1e12) return (n / 1e12).toFixed(1) + 'T';
+  if (n >= 1e9) return Math.round(n / 1e9) + 'G';
+  if (n >= 1e6) return Math.round(n / 1e6) + 'M';
+  return Math.round(n / 1e3) + 'K';
+}
+function fmtStats(s) {
+  if (!s || (s.cpu == null && s.mem == null && !s.disk)) return '—';
+  const p = [];
+  if (s.cpu != null) p.push(`CPU ${s.cpu}%`);
+  if (s.gpu != null) p.push(`GPU ${s.gpu}%`);
+  if (s.mem != null) p.push(`RAM ${s.mem}%`);
+  if (s.disk && s.disk.free != null) p.push(`/ ${fmtBytes(s.disk.free)} free`);
+  return p.join(' · ');
+}
+async function refreshMachineStats() {
+  await Promise.all(machineStatsTargets.map(async (t) => {
+    let s = null;
+    try { const r = await fetch(t.url, { cache: 'no-store' }); if (r.ok) s = await r.json(); } catch { /* unreachable */ }
+    if (t.statsEl.isConnected) t.statsEl.textContent = fmtStats(s);
+  }));
+}
+function startStatsPolling() {
+  if (statsTimer) return;
+  statsTimer = setInterval(() => { if (!pickerView.hidden && machineStatsTargets.length) refreshMachineStats(); }, 5000);
+}
+
+// A row of webmux instances on the tailnet: this machine (marked) + peers, each
+// shown as a small card with live CPU/GPU/RAM/disk stats. Tapping a peer switches
+// to it in the SAME tab; if it can't be reached here, tapping shows a hint.
+function machineCard(tag, labelText) {
+  const el = document.createElement(tag);
+  el.className = 'machine';
+  const nameEl = document.createElement('span');
+  nameEl.className = 'machine-name';
+  const label = document.createElement('span');
+  label.className = 'machine-label';
+  label.textContent = labelText;
+  nameEl.append(label);
+  const statsEl = document.createElement('span');
+  statsEl.className = 'machine-stats';
+  statsEl.textContent = '…';
+  el.append(nameEl, statsEl);
+  return { el, nameEl, statsEl };
+}
 async function loadMachines() {
   const wrap = $('machines'), row = $('machines-row'), hint = $('machine-hint');
   if (!wrap) return;
@@ -118,13 +165,12 @@ async function loadMachines() {
   row.innerHTML = '';
   hint.hidden = true;
   hint.innerHTML = '';
+  machineStatsTargets = [];
 
   if (data.self && data.self.url) {
-    const me = document.createElement('span');
-    me.className = 'machine current';
-    if (issue) me.classList.add('unreachable');
-    me.textContent = (data.self.dns || '').split('.')[0] || 'this';
-    if (issue) me.title = issue.message;
+    const { el, nameEl, statsEl } = machineCard('span', (data.self.dns || '').split('.')[0] || 'this');
+    el.classList.add('current');
+    if (issue) { el.classList.add('unreachable'); el.title = issue.message; }
     const copy = document.createElement('button');
     copy.className = 'machine-copy';
     copy.title = 'Copy this machine’s share URL';
@@ -135,33 +181,35 @@ async function loadMachines() {
         .then(() => { copy.textContent = '✓'; setTimeout(() => { copy.textContent = '⧉'; }, 1000); })
         .catch(() => {});
     });
-    me.append(copy);
-    row.append(me);
+    nameEl.append(copy);
+    row.append(el);
+    machineStatsTargets.push({ statsEl, url: '/api/stats' });
   } else if (issue) {
-    const me = document.createElement('span');
-    me.className = 'machine current unreachable';
-    me.textContent = 'this PC';
-    me.title = issue.message;
-    row.append(me);
+    const { el } = machineCard('span', 'this PC');
+    el.classList.add('current', 'unreachable');
+    el.title = issue.message;
+    row.append(el);
+    machineStatsTargets.push({ statsEl: el.querySelector('.machine-stats'), url: '/api/stats' });
   }
 
   for (const p of peers) {
-    const a = document.createElement('a');
-    a.className = 'machine';
-    a.href = p.url;                 // same-tab navigation (no target=_blank)
-    a.textContent = p.name || p.dns;
-    a.title = p.dns;
-    a.addEventListener('click', (e) => {
-      if (a.dataset.unreachable === '1') { e.preventDefault(); showMachineHint(p); }
+    const { el } = machineCard('a', p.name || p.dns);
+    el.href = p.url;                 // same-tab navigation (no target=_blank)
+    el.title = p.dns;
+    el.addEventListener('click', (e) => {
+      if (el.dataset.unreachable === '1') { e.preventDefault(); showMachineHint(p); }
     });
-    row.append(a);
+    row.append(el);
+    machineStatsTargets.push({ statsEl: el.querySelector('.machine-stats'), url: `/api/peer/stats?dns=${encodeURIComponent(p.dns)}&ip=${encodeURIComponent(p.ip)}` });
     // Probe from THIS device; if unreachable, mark it and offer the hint.
     probeReachable(p.url).then((ok) => {
-      if (!ok) { a.classList.add('unreachable'); a.dataset.unreachable = '1'; }
+      if (!ok) { el.classList.add('unreachable'); el.dataset.unreachable = '1'; }
     });
   }
   if (issue) renderMachineHint(hint, issue.message, issue.command);
   wrap.hidden = false;
+  refreshMachineStats();
+  startStatsPolling();
 }
 
 function tailnetIssue(data) {

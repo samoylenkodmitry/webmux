@@ -64,20 +64,24 @@ html, body {
 .machines-row::-webkit-scrollbar { display: none; }
 .machine {
   flex: none;
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 6px 12px; border-radius: 999px;
+  display: inline-flex; flex-direction: column; gap: 3px;
+  padding: 8px 12px; border-radius: 12px; min-width: 132px;
   background: var(--bar); border: 1px solid var(--border);
   color: var(--fg); text-decoration: none;
-  font-size: 13px; white-space: nowrap; cursor: pointer;
+  white-space: nowrap; cursor: pointer;
 }
-.machine::before { content: "●"; color: #3fb950; font-size: 10px; }
+.machine-name { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.machine-name::before { content: "●"; color: #3fb950; font-size: 10px; }
+.machine-label { overflow: hidden; text-overflow: ellipsis; }
+.machine-stats { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .machine:hover { border-color: var(--accent); }
-.machine.current { border-color: var(--accent); color: var(--accent); cursor: default; }
+.machine.current { border-color: var(--accent); cursor: default; }
+.machine.current .machine-name { color: var(--accent); }
 .machine.unreachable { color: var(--muted); border-style: dashed; }
-.machine.unreachable::before { color: var(--muted); }
+.machine.unreachable .machine-name::before { color: var(--muted); }
 .machine-copy {
   appearance: none; background: none; border: none; cursor: pointer;
-  color: var(--muted); font-size: 13px; padding: 0 2px; line-height: 1;
+  color: var(--muted); font-size: 13px; padding: 0 2px; line-height: 1; margin-left: auto;
 }
 .machine-hint {
   margin-top: 8px; padding: 10px 12px;

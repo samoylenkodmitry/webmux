@@ -16,7 +16,7 @@ import http from 'node:http';
 import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, statfs } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -400,6 +400,62 @@ function webmuxVersion() {
   return _versionPromise;
 }
 
+// --- machine stats (CPU / GPU / disk / RAM) for the picker's machine row ----
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function cpuTimes() {
+  let idle = 0, total = 0;
+  for (const c of os.cpus()) { for (const k in c.times) total += c.times[k]; idle += c.times.idle; }
+  return { idle, total };
+}
+async function cpuPercent() {
+  const a = cpuTimes();
+  await sleep(120);
+  const b = cpuTimes();
+  const dt = b.total - a.total, di = b.idle - a.idle;
+  return dt > 0 ? Math.max(0, Math.min(100, Math.round((1 - di / dt) * 100))) : null;
+}
+// Best-effort GPU utilisation %: NVIDIA via nvidia-smi, else AMD/Intel via the
+// DRM sysfs `gpu_busy_percent`. Returns null when nothing reports it.
+async function gpuPercent() {
+  try {
+    const { stdout } = await execFileP('nvidia-smi', ['--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'], { encoding: 'utf8', timeout: 1500 });
+    const v = parseInt(stdout.trim().split('\n')[0], 10);
+    if (Number.isFinite(v)) return v;
+  } catch { /* no nvidia */ }
+  try {
+    for (const d of await readdir('/sys/class/drm')) {
+      if (!/^card\d+$/.test(d)) continue;
+      try {
+        const v = parseInt(await readFile(`/sys/class/drm/${d}/device/gpu_busy_percent`, 'utf8'), 10);
+        if (Number.isFinite(v)) return v;
+      } catch { /* try next card */ }
+    }
+  } catch { /* no drm sysfs */ }
+  return null;
+}
+async function diskFree() {
+  try {
+    const s = await statfs('/');
+    const total = s.blocks * s.bsize;
+    const free = s.bavail * s.bsize;
+    return { free, total, usedPct: total ? Math.round((1 - free / total) * 100) : null };
+  } catch { return null; }
+}
+function memPercent() {
+  const total = os.totalmem();
+  return total ? Math.round((1 - os.freemem() / total) * 100) : null;
+}
+// Cached so rapid polls (and several browser tabs) don't each pay the CPU sample.
+let _statsCache = null, _statsStamp = 0;
+async function machineStats() {
+  const now = Date.now();
+  if (_statsCache && now - _statsStamp < 2000) return _statsCache;
+  const [cpu, gpu, disk] = await Promise.all([cpuPercent(), gpuPercent(), diskFree()]);
+  _statsStamp = Date.now();
+  _statsCache = { host: os.hostname(), cpu, gpu, mem: memPercent(), disk };
+  return _statsCache;
+}
+
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = parseInt(process.env.PORT || '8083', 10);
 const TERM_NAME = process.env.TERM_NAME || 'xterm-256color';
@@ -441,27 +497,59 @@ function prettyPath(p) {
 // so we use a printable multi-char delimiter that won't appear in real paths/commands.
 const FS = '<<>>';
 
+// tmux's `pane_current_command` is just the comm of the pane's foreground process
+// — so `sudo btop` shows as "sudo". Resolve the pane's controlling-terminal
+// foreground process group (via /proc tpgid) and read its full argv for a much
+// more informative label. Linux-only; elsewhere we keep the comm.
+function cleanCommand(argv) {
+  if (!argv || !argv.length) return '';
+  let prog = String(argv[0]).replace(/^-/, '');   // login shells appear as "-zsh"
+  prog = prog.split('/').pop();                    // basename of the program
+  const s = [prog, ...argv.slice(1)].join(' ').trim();
+  return s.length > 160 ? s.slice(0, 159) + '…' : s;
+}
+async function foregroundCommand(panePid, fallback) {
+  const pid = Number(panePid);
+  if (process.platform !== 'linux' || !Number.isInteger(pid) || pid <= 0) return fallback;
+  try {
+    // /proc/<pid>/stat: after the "(comm)" field come state ppid pgrp session
+    // tty_nr tpgid … — index 5 past the last ')' is tpgid (foreground pgid).
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+    const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const tpgid = parseInt(after[5], 10);
+    const target = Number.isInteger(tpgid) && tpgid > 0 ? tpgid : pid;
+    const argv = (await readFile(`/proc/${target}/cmdline`, 'utf8')).split('\0').filter(Boolean);
+    return argv.length ? cleanCommand(argv) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 async function listSessions() {
   let out;
   try {
     // Pane vars resolve against each session's active pane, so one call is enough.
     out = await tmux([
       'list-sessions', '-F',
-      `#{session_name}${FS}#{session_attached}${FS}#{session_windows}${FS}#{pane_current_command}${FS}#{pane_current_path}`,
+      `#{session_name}${FS}#{session_attached}${FS}#{session_windows}${FS}#{pane_current_command}${FS}#{pane_current_path}${FS}#{pane_pid}`,
     ]);
   } catch {
     return []; // no server running -> no sessions
   }
-  return out.split('\n').filter(Boolean).map((line) => {
-    const [name, attached, windows, command, cwd] = line.split(FS);
+  const rows = out.split('\n').filter(Boolean).map((line) => {
+    const [name, attached, windows, command, cwd, panePid] = line.split(FS);
     return {
       name,
       attached: Number(attached) || 0,
       windows: Number(windows) || 0,
       command: command || '',
       path: prettyPath(cwd || ''),
+      panePid,
     };
   });
+  // Upgrade each comm to the full foreground command line (best-effort, parallel).
+  await Promise.all(rows.map(async (r) => { r.command = await foregroundCommand(r.panePid, r.command); delete r.panePid; }));
+  return rows;
 }
 
 async function uniqueName(base) {
@@ -643,6 +731,21 @@ const server = http.createServer(async (req, res) => {
     const data = await fetchPeerJson(ip, dns, '/api/health', 4000);
     return sendJson(res, 200, { reachable: Boolean(data), version: (data && data.version) || '', ok: Boolean(data && data.ok) });
   }
+  if (url.pathname === '/api/stats') {
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+    return sendJson(res, 200, await machineStats());
+  }
+  if (url.pathname === '/api/peer/stats') {
+    // Proxy a peer's stats for the picker's machine row (same peer-allowlist guard).
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+    if (!TAILSCALE_ENABLED) return sendJson(res, 200, {});
+    const dns = url.searchParams.get('dns') || '';
+    const ip = url.searchParams.get('ip') || '';
+    const peers = await tailscalePeers();
+    const match = peers.find((p) => p.dns === dns && p.ip === ip);
+    if (!match) return sendJson(res, 404, { error: 'unknown peer' });
+    return sendJson(res, 200, (await fetchPeerJson(ip, dns, '/api/stats', 4000)) || {});
+  }
   if (url.pathname === '/api/update') {
     if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
     const scope = url.searchParams.get('scope') || 'self';
@@ -809,8 +912,10 @@ async function startSession(ws, mode, name, url) {
       args = ['attach-session', '-t', `=${name}`];
     } else {
       name = await uniqueName(name);
-      // Optional start directory (e.g. reopening a recent dir from history).
-      const dir = url.searchParams.get('dir') || '';
+      // Start directory: an explicit dir (e.g. reopening a recent dir) wins;
+      // otherwise default to HOME so new terminals open in ~ rather than the
+      // service's working directory (~/.local/share/webmux).
+      const dir = url.searchParams.get('dir') || HOME || '';
       const create = ['new-session', '-d', '-s', name];
       if (dir) create.push('-c', dir);
       // Create the session up front — detached and persistent — in one atomic
