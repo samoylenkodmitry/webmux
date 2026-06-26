@@ -95,7 +95,7 @@ webmux has **no authentication** — anyone who can reach the port gets a shell 
 - "Open on PC" is best-effort; with no display it falls back to a browser-only session.
 - Opening a peer's `…ts.net` URL from a desktop needs Tailscale MagicDNS working there; if it doesn't, the picker shows a one-line `/etc/hosts` workaround for that peer.
 - HTTP API: `/api/sessions`, `/api/session`, `/api/recents`, `/api/capture`, `/api/windows`, `/api/open`, `/api/kill`, `/api/update`, `/api/peer/sessions`, `/api/tailnet`, `/api/health`; WebSocket at `/ws/session/<name>` and `/ws/new`. See [`server.js`](server.js).
-- The **all-PCs update** only reaches peers that already run this version (it POSTs `/api/update` to each); update a box once the normal way and thereafter it joins the one-tap fleet update.
+- The **all-PCs update** reaches every webmux box on your tailnet: newer ones via `POST /api/update`, and older ones (predating that endpoint) by driving their `/ws/new` shell to run the installer — the same shell access the UI already has. The install is detached with `nohup` so it survives the service restart it triggers (output goes to `/tmp/webmux-update.log` on each peer).
 
 ## License
 MIT

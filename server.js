@@ -20,7 +20,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, WebSocket as WsClient } from 'ws';
 import pty from 'node-pty';
 
 const execFileP = promisify(execFile);
@@ -170,6 +170,53 @@ function postPeerUpdate(ip, dns, timeoutMs) {
     req.on('timeout', () => { req.destroy(); resolve(false); });
     req.end();
   });
+}
+
+// Bootstrap a peer that's too OLD to have /api/update: drive its `/ws/new` the
+// same way the UI does — it opens a tmux session with a shell — and "type" the
+// installer one-liner into it. The install is wrapped in `nohup … & disown` so it
+// detaches from the throwaway session and survives both the session closing and
+// the service restart it triggers. Resolves true once the command was dispatched.
+function bootstrapPeerViaShell(ip, dns, connectTimeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false, sent = false;
+    const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
+    let ws;
+    try {
+      ws = new WsClient(`wss://${ip}/ws/new?cols=80&rows=24`, {
+        servername: dns, headers: { Host: dns }, handshakeTimeout: connectTimeoutMs,
+      });
+    } catch { return resolve(false); }
+    const giveUp = setTimeout(() => { try { ws.close(); } catch { /* ignore */ } settle(false); }, connectTimeoutMs + 8000);
+    ws.on('message', (data, isBinary) => {
+      if (isBinary || sent) return;
+      let msg; try { msg = JSON.parse(data.toString()); } catch { return; }
+      if (msg.type === 'session') {
+        sent = true;
+        // Let the shell's rc settle, then send a detached self-update + exit.
+        setTimeout(() => {
+          const inner = `WEBMUX_NONINTERACTIVE=1 curl -fsSL ${INSTALL_URL} | bash`;
+          const cmd = `nohup sh -c '${inner}' >/tmp/webmux-update.log 2>&1 </dev/null & disown 2>/dev/null; exit\n`;
+          try { ws.send(Buffer.from(cmd, 'utf8')); }
+          catch { clearTimeout(giveUp); return settle(false); }
+          // Flush, then close. nohup keeps the install running on its own.
+          setTimeout(() => { clearTimeout(giveUp); try { ws.close(); } catch { /* ignore */ } settle(true); }, 1500);
+        }, 1000);
+      } else if (msg.type === 'error') {
+        clearTimeout(giveUp); settle(false);
+      }
+    });
+    ws.on('error', () => { clearTimeout(giveUp); settle(false); });
+    ws.on('close', () => { clearTimeout(giveUp); settle(false); });
+  });
+}
+
+// Update one peer: prefer the native endpoint (clean, watchable session on newer
+// builds); fall back to driving its shell over /ws/new for builds that predate it.
+async function updatePeer(p) {
+  if (await postPeerUpdate(p.ip, p.dns, 8000)) return { name: p.name, dns: p.dns, ok: true, via: 'api' };
+  const ok = await bootstrapPeerViaShell(p.ip, p.dns, 6000);
+  return { name: p.name, dns: p.dns, ok, via: ok ? 'shell' : 'fail' };
 }
 
 // Cached peer probe — discovering peers means an HTTPS round-trip to every
@@ -572,7 +619,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const status = await tailscaleStatus();
         const list = status.running ? await tailscalePeers() : [];
-        peers = await Promise.all(list.map(async (p) => ({ name: p.name, dns: p.dns, ok: await postPeerUpdate(p.ip, p.dns, 8000) })));
+        peers = await Promise.all(list.map((p) => updatePeer(p)));
       } catch { /* peer fan-out is best-effort */ }
     }
     return sendJson(res, 200, { ok: true, session: UPDATE_SESSION, peers });
