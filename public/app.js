@@ -735,6 +735,7 @@ function backToPicker() {
   closeMenu();
   closeWindows();
   closeCompose();
+  closeUpdateProgress();
   resolveConfirm(false);
   copyViewEl.hidden = true;
   clearMods();
@@ -1038,41 +1039,131 @@ $('menu-reconnect').addEventListener('click', () => {
   if (term) term.focus();
 });
 
-function overlayBriefly(text, ms = 1800) {
-  overlayText.textContent = text;
-  overlay.hidden = false;
-  setTimeout(() => { overlay.hidden = true; }, ms);
+// --- fleet update with a progress window ----------------------------------
+// This PC is the source of truth: it tells every tailnet peer to self-update,
+// then we poll each peer's reported version until it matches this PC's (= it
+// pulled the new code and restarted). This PC itself isn't restarted, so it can
+// keep proxying peer health for the progress UI.
+const updateProgressEl = $('update-progress');
+let updatePoll = null;
+
+function closeUpdateProgress() {
+  clearInterval(updatePoll);
+  updatePoll = null;
+  updateProgressEl.hidden = true;
+}
+$('update-close').addEventListener('click', closeUpdateProgress);
+updateProgressEl.addEventListener('click', (e) => { if (e.target === updateProgressEl) closeUpdateProgress(); });
+
+function updateRow(m) {
+  const li = document.createElement('li');
+  li.className = 'session';
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const name = document.createElement('div');
+  name.className = 'name';
+  name.textContent = m.name + (m.self ? '  (this PC)' : '');
+  const sub = document.createElement('div');
+  sub.className = 'sub';
+  meta.append(name, sub);
+  const badge = document.createElement('span');
+  badge.className = 'badge';
+  li.append(meta, badge);
+  m.subEl = sub; m.badgeEl = badge;
+  setRowState(m, m.self ? 'done' : 'queued');
+  return li;
+}
+function setRowState(m, state, detail) {
+  m.state = state;
+  const map = {
+    queued:   ['queued…',     ''],
+    updating: ['updating…',   'live'],
+    done:     ['✓ updated',   'live'],
+    current:  ['✓ current',   'live'],
+    failed:   ['✗ failed',    ''],
+    timeout:  ['⏱ slow…',     ''],
+  };
+  const [label, cls] = map[state] || ['', ''];
+  m.badgeEl.textContent = m.self && state === 'done' ? '✓ current' : label;
+  m.badgeEl.className = 'badge' + (cls ? ' ' + cls : '');
+  if (detail !== undefined) m.subEl.textContent = detail;
 }
 
-// Self-update every webmux box on the tailnet. The server launches the installer
-// one-liner in a `webmux-update` tmux session on each machine; we then attach to
-// THIS machine's so the user can watch it update + restart live.
 $('menu-update').addEventListener('click', async () => {
   const ok = await askConfirm({
-    title: 'Update webmux',
-    message: 'Run the installer on this PC and every webmux machine on your tailnet, then restart each service? You’ll watch this PC update live.',
+    title: 'Update all PCs',
+    message: 'Update every other webmux machine on your tailnet to this PC’s version (non-interactive — each keeps its own settings)?',
     okLabel: 'Update all',
   });
   if (!ok) return;
   closeMenu();
-  let session = 'webmux-update';
+  openUpdateProgress();
+});
+
+async function openUpdateProgress() {
+  const listEl = $('update-list');
+  const note = $('update-note');
+  listEl.innerHTML = '';
+  note.textContent = 'Starting…';
+  updateProgressEl.hidden = false;
+
+  const self = { id: 'self', name: 'This PC', self: true };
+  const machines = [self];
+  listEl.append(updateRow(self));
+
+  let target = '';
   let peers = [];
   try {
     const res = await fetch('/api/update?scope=all', { method: 'POST' });
     const j = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(j.error || 'update failed');
-    if (j.session) session = j.session;
+    target = j.version || '';
     peers = Array.isArray(j.peers) ? j.peers : [];
   } catch (e) {
-    overlayBriefly('Could not start update: ' + (e.message || e), 2400);
+    note.textContent = 'Could not start update: ' + (e.message || e);
     return;
   }
-  if (peers.length) {
-    const okPeers = peers.filter((p) => p.ok).length;
-    overlayBriefly(`Updating this PC + ${okPeers}/${peers.length} peer(s)…`, 1600);
+  self.subEl.textContent = target ? 'version ' + target : '';
+
+  for (const p of peers) {
+    const m = { id: p.dns, name: p.name, dns: p.dns, ip: p.ip };
+    machines.push(m);
+    listEl.append(updateRow(m));
+    setRowState(m, p.ok ? 'updating' : 'failed', p.ok ? `triggered via ${p.via}` : 'could not reach');
   }
-  switchSession('attach', session); // watch this machine update in real time
-});
+  if (peers.length === 0) { note.textContent = 'No other webmux machines found on the tailnet.'; return; }
+
+  const peerMachines = machines.filter((m) => !m.self);
+  const started = Date.now();
+  const TIMEOUT_MS = 240000;
+  note.textContent = `Updating ${peerMachines.length} machine(s) to ${target || 'latest'}…`;
+
+  const tick = async () => {
+    const elapsed = Math.round((Date.now() - started) / 1000);
+    await Promise.all(peerMachines.map(async (m) => {
+      if (m.state === 'done' || m.state === 'failed') return;
+      let health = null;
+      try {
+        const r = await fetch(`/api/peer/health?dns=${encodeURIComponent(m.dns)}&ip=${encodeURIComponent(m.ip)}`, { cache: 'no-store' });
+        if (r.ok) health = await r.json();
+      } catch { /* unreachable mid-restart */ }
+      const v = health && health.version;
+      if (v && (!target || v === target)) setRowState(m, 'done', 'version ' + v);
+      else if (Date.now() - started > TIMEOUT_MS) setRowState(m, 'timeout', v ? 'still on ' + v : 'no response');
+      else setRowState(m, 'updating', v ? 'on ' + v + ', updating…' : `updating… (${elapsed}s)`);
+    }));
+    const pending = peerMachines.filter((m) => m.state === 'updating');
+    if (!pending.length) {
+      clearInterval(updatePoll); updatePoll = null;
+      const done = peerMachines.filter((m) => m.state === 'done').length;
+      note.textContent = `Done — ${done}/${peerMachines.length} updated.` +
+        (done < peerMachines.length ? ' Some may still be finishing (slow boxes rebuild node-pty).' : '');
+    }
+  };
+  clearInterval(updatePoll);
+  updatePoll = setInterval(tick, 4000);
+  tick();
+}
 
 $('menu-windows').addEventListener('click', () => { closeMenu(); openWindows(); });
 

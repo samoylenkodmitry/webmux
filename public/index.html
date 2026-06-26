@@ -121,6 +121,18 @@
       </div>
     </div>
 
+    <!-- fleet update progress: one row per machine, live status -->
+    <div id="update-progress" class="sheet" hidden>
+      <div class="sheet-panel" role="dialog" aria-label="Update progress">
+        <div class="sheet-head">
+          <span>Updating webmux</span>
+          <button id="update-close" class="btn" title="Close">✕</button>
+        </div>
+        <ul id="update-list" class="sessions"></ul>
+        <p id="update-note" class="status"></p>
+      </div>
+    </div>
+
     <!-- reliable in-app confirm dialog (window.confirm is flaky in PWAs) -->
     <div id="confirm" class="sheet" hidden>
       <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="confirm-title">

@@ -8,13 +8,30 @@ set -euo pipefail
 
 APP="webmux"
 REPO="https://github.com/samoylenkodmitry/webmux"
-HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8083}"
 TTYDEV=/dev/tty
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Reuse settings from an existing install so updates (esp. the non-interactive
+# fleet update) don't reset the user's choices. Echoes an Environment= var from
+# the systemd unit (or the matching plist key on macOS); empty if no prior install.
+prior_env() {
+  local var="$1"
+  local unit="$HOME/.config/systemd/user/$APP.service"
+  local plist="$HOME/Library/LaunchAgents/com.$APP.plist"
+  if [ -f "$unit" ]; then
+    sed -n "s/^Environment=$var=//p" "$unit" | tail -n1
+  elif [ -f "$plist" ]; then
+    grep "<key>$var</key>" "$plist" 2>/dev/null | sed -E 's#.*<string>([^<]*)</string>.*#\1#' | tail -n1
+  fi
+  return 0
+}
+PRIOR_HOST="$(prior_env HOST)"; PRIOR_PORT="$(prior_env PORT)"
+PRIOR_DT="$(prior_env DESKTOP_TERMINAL)"; PRIOR_TS="$(prior_env WEBMUX_TAILSCALE)"
+HOST="${HOST:-${PRIOR_HOST:-127.0.0.1}}"
+PORT="${PORT:-${PRIOR_PORT:-8083}}"
 
 # Prompts work even under `curl | bash` by reading the controlling terminal.
 interactive() {
@@ -238,6 +255,10 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   [ -f "$d/server.js" ] && SRC="$d"
 fi
 [ -z "$SRC" ] && [ -f "$PWD/server.js" ] && SRC="$PWD"
+# The managed install dir is a deploy target, not a pinned dev checkout: even
+# though it contains server.js, always pull latest there. Without this, the
+# update button / one-liner run from inside it would just reinstall the old code.
+[ -n "$SRC" ] && [ "$SRC" = "${WEBMUX_DIR:-$HOME/.local/share/$APP}" ] && SRC=""
 
 # --- prerequisites --------------------------------------------------------
 miss=0
@@ -259,13 +280,17 @@ if [ -n "$TMUX_BIN" ] && ask_yn "Customize tmux to hide its status bar (cleaner 
   setup_tmux_tweaks
 fi
 
-# desktop terminal: let the user pick which installed one to open sessions in
+# desktop terminal: reuse the prior choice on (non-interactive) updates; else pick.
 TERMLIST="$(detect_terminals)"
 DESKTOP_TERMINAL_CHOICE=""
-if [ -n "$TERMLIST" ]; then
+if ! interactive && [ -n "$PRIOR_DT" ]; then
+  DESKTOP_TERMINAL_CHOICE="$PRIOR_DT"
+elif [ -n "$TERMLIST" ]; then
   DESKTOP_TERMINAL_CHOICE="$(choose "Which terminal should 'New' open on this machine's desktop?" "$TERMLIST")"
-  say "Desktop terminal for 'New': $DESKTOP_TERMINAL_CHOICE"
+else
+  DESKTOP_TERMINAL_CHOICE="$PRIOR_DT"
 fi
+[ -n "$DESKTOP_TERMINAL_CHOICE" ] && say "Desktop terminal for 'New': $DESKTOP_TERMINAL_CHOICE"
 
 # Offer to make all normally-opened terminals show up in webmux (auto-tmux).
 if ask_yn "Make terminals you open normally show up in webmux too (auto-start tmux in new shells)? [y/N]" N; then
@@ -292,7 +317,12 @@ WEBMUX_TAILSCALE_ENABLED=
 TAILSCALE_SERVE_CONFIGURED=0
 resolve_tailscale
 if [ -n "$TAILSCALE_BIN" ]; then
-  if ask_yn "Show your Tailscale share URL (and other webmux instances on the tailnet) in the picker? [Y/n]" Y; then
+  if ! interactive; then
+    # Non-interactive: reuse the prior setting on updates; default on for a fresh
+    # install. Don't reconfigure Serve (it's already set up, or the user will).
+    if [ -n "$PRIOR_TS" ]; then [ "$PRIOR_TS" = 1 ] && WEBMUX_TAILSCALE_ENABLED=1
+    else WEBMUX_TAILSCALE_ENABLED=1; fi
+  elif ask_yn "Show your Tailscale share URL (and other webmux instances on the tailnet) in the picker? [Y/n]" Y; then
     WEBMUX_TAILSCALE_ENABLED=1
     if ask_yn "Configure Tailscale Serve for webmux now? [Y/n]" Y; then
       setup_tailscale_serve && TAILSCALE_SERVE_CONFIGURED=1 || true
