@@ -561,6 +561,7 @@ function ensureTerm() {
   setupTouchScroll();
   renderSnippets();
   applySnippetsVisibility();
+  fetchSnippets(); // pull the fleet-shared list from the server, then re-render
 }
 
 // The scrollback lives in tmux, not in xterm. tmux `mouse on` means a real mouse
@@ -1365,13 +1366,35 @@ composeInput.addEventListener('keydown', (e) => {
 
 // --- quick-reply snippets -------------------------------------------------
 // A toggleable row of chips that each send their text + Enter — for answering
-// coding agents (y / continue / approve …) without the keyboard. Editable list,
-// persisted in localStorage.
+// coding agents (y / continue / approve …) without the keyboard. The list is
+// stored server-side and synced across the whole tailnet, so editing it on one
+// machine updates all of them; localStorage is just an offline cache.
 const SNIP_KEY = 'ptw-snippets';
 const SNIP_DEFAULT = ['y', 'n', 'continue', 'approve', '/clear', 'exit'];
-function loadSnippets() {
+let snippetsCache = null; // last list seen from the server (this PC)
+function localSnippets() {
   try { const a = JSON.parse(localStorage.getItem(SNIP_KEY)); return Array.isArray(a) ? a : SNIP_DEFAULT; }
   catch { return SNIP_DEFAULT; }
+}
+function currentSnippets() { return snippetsCache || localSnippets(); }
+// Pull the fleet-shared list from this machine's server, then re-render.
+async function fetchSnippets() {
+  try {
+    const r = await fetch('/api/snippets', { cache: 'no-store' });
+    if (r.ok) {
+      const a = (await r.json()).snippets;
+      if (Array.isArray(a)) { snippetsCache = a; try { localStorage.setItem(SNIP_KEY, JSON.stringify(a)); } catch { /* quota */ } }
+    }
+  } catch { /* offline: keep cache/local */ }
+  renderSnippets();
+}
+// Save edits + push them to every webmux on the tailnet.
+async function saveSnippetsToFleet(arr) {
+  snippetsCache = arr;
+  try { localStorage.setItem(SNIP_KEY, JSON.stringify(arr)); } catch { /* quota */ }
+  renderSnippets();
+  try { await fetch('/api/snippets?scope=all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ snippets: arr }) }); }
+  catch { /* offline: stays local until next save */ }
 }
 function sendSnippet(text) {
   ensureBottom();
@@ -1382,7 +1405,7 @@ function sendSnippet(text) {
 }
 function renderSnippets() {
   snippetsEl.innerHTML = '';
-  for (const sn of loadSnippets()) {
+  for (const sn of currentSnippets()) {
     const b = document.createElement('button');
     b.className = 'snip';
     b.textContent = sn;
@@ -1410,7 +1433,13 @@ function toggleSnippets() {
   try { localStorage.setItem('ptw-snippets-open', JSON.stringify(snippetsOpen)); } catch { /* ignore */ }
   applySnippetsVisibility();
 }
-function openSnipEdit() { snipEditText.value = loadSnippets().join('\n'); snipEditEl.hidden = false; }
+function openSnipEdit() {
+  const initial = currentSnippets().join('\n');
+  snipEditText.value = initial;
+  snipEditEl.hidden = false;
+  // Refresh from the fleet, but only re-fill if the user hasn't started editing.
+  fetchSnippets().then(() => { if (!snipEditEl.hidden && snipEditText.value === initial) snipEditText.value = currentSnippets().join('\n'); });
+}
 function closeSnipEdit() { snipEditEl.hidden = true; }
 $('snip-btn').addEventListener('click', toggleSnippets);
 $('menu-snippets').addEventListener('click', () => { closeMenu(); if (!snippetsOpen) toggleSnippets(); openSnipEdit(); });
@@ -1418,8 +1447,7 @@ $('snip-edit-close').addEventListener('click', closeSnipEdit);
 snipEditEl.addEventListener('click', (e) => { if (e.target === snipEditEl) closeSnipEdit(); });
 $('snip-edit-save').addEventListener('click', () => {
   const arr = snipEditText.value.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 40);
-  try { localStorage.setItem(SNIP_KEY, JSON.stringify(arr)); } catch { /* ignore */ }
-  renderSnippets();
+  saveSnippetsToFleet(arr);
   closeSnipEdit();
 });
 

@@ -708,6 +708,22 @@ function recordRecent(dir, command) {
   saveRecents();
 }
 
+// --- quick-reply snippets (shared across the fleet) ------------------------
+// Stored server-side and persisted, so editing them on one webmux can be pushed
+// to every tailnet peer (each box's clients read from their own server).
+const SNIPPETS_FILE = path.join(STATE_DIR, 'snippets.json');
+const DEFAULT_SNIPPETS = ['y', 'n', 'continue', 'approve', '/clear', 'exit'];
+let snippets = DEFAULT_SNIPPETS.slice();
+async function loadSnippetsFile() {
+  try {
+    const a = JSON.parse(await readFile(SNIPPETS_FILE, 'utf8'));
+    if (Array.isArray(a)) snippets = a.filter((s) => typeof s === 'string');
+  } catch { /* keep defaults */ }
+}
+function saveSnippetsFile() {
+  mkdir(STATE_DIR, { recursive: true }).then(() => writeFile(SNIPPETS_FILE, JSON.stringify(snippets))).catch(() => {});
+}
+
 // --- Web Push (activity alerts) --------------------------------------------
 // Notify the phone when a session that was producing output goes quiet while no
 // client is attached — i.e. "your agent/build finished and is waiting." Best
@@ -931,6 +947,25 @@ const server = http.createServer(async (req, res) => {
       } catch { /* best effort */ }
     }
     return sendJson(res, 200, { results: [selfResult, ...peerResults] });
+  }
+  if (url.pathname === '/api/snippets') {
+    // Shared quick-reply chips. GET returns them; POST replaces them and (scope=all)
+    // pushes the same list to every tailnet peer so the fleet stays in sync.
+    if (req.method === 'GET') return sendJson(res, 200, { snippets });
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+    const body = await readBody(req);
+    if (!Array.isArray(body.snippets)) return sendJson(res, 400, { error: 'invalid snippets' });
+    snippets = body.snippets.filter((s) => typeof s === 'string').slice(0, 100);
+    saveSnippetsFile();
+    let peers = [];
+    if ((url.searchParams.get('scope') || 'self') === 'all' && TAILSCALE_ENABLED) {
+      try {
+        const status = await tailscaleStatus();
+        const list = status.running ? await tailscalePeers() : [];
+        peers = await Promise.all(list.map(async (p) => ({ name: p.name, ok: Boolean(await postPeerJson(p.ip, p.dns, '/api/snippets', { snippets }, 8000)) })));
+      } catch { /* best effort */ }
+    }
+    return sendJson(res, 200, { ok: true, snippets, peers });
   }
   if (url.pathname === '/api/push/key') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
@@ -1205,6 +1240,7 @@ server.listen(PORT, HOST, () => {
 // Track recent directories: seed from current sessions, then sample so that a
 // session disappearing records its last directory into the history.
 await initPush();
+await loadSnippetsFile();
 await loadRecents();
 await sampleSessions();
 const sampler = setInterval(() => { sampleSessions().catch(() => {}); }, 5000);
