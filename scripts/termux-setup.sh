@@ -21,7 +21,9 @@ REPO="https://github.com/samoylenkodmitry/webmux"
 
 say "Installing packages (node, tmux, build tools)…"
 pkg update -y
-pkg install -y nodejs-lts tmux git python clang make
+# binutils: node-pty's native build needs `strip`/`ld`. termux-api: the wake-lock
+# below. ripgrep: Claude Code shells out to it.
+pkg install -y nodejs-lts tmux git python clang make binutils termux-api ripgrep
 
 say "Fetching webmux into $DIR…"
 if [ -d "$DIR/.git" ]; then git -C "$DIR" pull --ff-only || true
@@ -29,8 +31,12 @@ else git clone --depth 1 "$REPO" "$DIR"; fi
 cd "$DIR"
 
 say "Installing deps (this builds node-pty from source)…"
-# node-pty's native build is the most fragile part on Termux. If it fails, webmux
-# can't open PTYs; see the note printed at the end.
+# node-pty's native build is the most fragile part on Termux. Two Termux-specific
+# fixes, both verified on a Galaxy Tab S7+ (Android 13, aarch64):
+#   1) node-gyp aborts with "Undefined variable android_ndk_path in binding.gyp"
+#      unless the NDK path is pointed at Termux's prefix.
+npm config set android_ndk_path "${PREFIX:-/data/data/com.termux/files/usr}"
+#   2) If npm still fails, it's the native build; the end note has the retry.
 npm install --no-fund --no-audit || warn "npm install failed — almost always node-pty's native build (see note below)."
 
 # Find this phone's Tailscale IP (CGNAT range 100.64.0.0/10) and bind ONLY to it.
@@ -43,10 +49,30 @@ if [ -z "$TSIP" ]; then
 fi
 say "Tailnet IP: $TSIP  →  webmux will listen on http://$TSIP:$PORT (tailnet-only)"
 
-# Optional: Claude Code on the phone, so you can run it here and steer it remotely.
-if ! command -v claude >/dev/null 2>&1; then
-  say "Installing Claude Code…"
-  npm install -g @anthropic-ai/claude-code || warn "claude install failed; later: npm i -g @anthropic-ai/claude-code"
+# Claude Code on the phone, so you can run it here and steer it remotely. Claude 2.x
+# ships a glibc native binary with NO Android build, so it can't run in bare Termux
+# ("claude native binary not installed"). We give it a real glibc userland via proot
+# instead: webmux + node-pty stay native in Termux (fast), only Claude runs inside
+# Debian. Verified running current Claude (2.1.x) on a Galaxy Tab S7+ this way.
+CLAUDE_DISTRO="${WEBMUX_CLAUDE_DISTRO:-debian}"
+CLAUDE_CMD=""
+if command -v proot-distro >/dev/null 2>&1 || pkg install -y proot-distro; then
+  if ! proot-distro list 2>/dev/null | grep -qiE "$CLAUDE_DISTRO.*installed"; then
+    say "Installing a $CLAUDE_DISTRO userland (proot) for current Claude Code…"
+    proot-distro install "$CLAUDE_DISTRO" || warn "proot-distro install $CLAUDE_DISTRO failed."
+  fi
+  if proot-distro list 2>/dev/null | grep -qiE "$CLAUDE_DISTRO.*installed"; then
+    say "Installing current Claude Code inside $CLAUDE_DISTRO…"
+    proot-distro login "$CLAUDE_DISTRO" -- bash -lc '
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y >/dev/null 2>&1
+      apt-get install -y nodejs npm ca-certificates >/dev/null 2>&1
+      command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
+    ' && CLAUDE_CMD="proot-distro login $CLAUDE_DISTRO -- bash -lc 'cd ~ && exec claude'" \
+      || warn "Claude install inside $CLAUDE_DISTRO failed; retry later."
+  fi
+else
+  warn "proot-distro unavailable; skipping Claude (webmux itself still works)."
 fi
 
 # Keep the CPU awake so Android doesn't suspend webmux in the background.
@@ -58,8 +84,13 @@ else warn "termux-wake-lock missing (install Termux:API) — Android may kill we
 pkill -f "node $DIR/server.js" 2>/dev/null || true
 nohup env HOST="$TSIP" PORT="$PORT" node "$DIR/server.js" >"$HOME/webmux.log" 2>&1 &
 sleep 1
-# A starter session so the picker isn't empty (open 'claude' here from any webmux).
+# Starter sessions so the picker isn't empty. A plain phone shell, plus — if Claude
+# installed — a 'claude' session running current Claude inside the proot userland.
+# Open either from any webmux; the claude one drops you at Claude's prompt.
 tmux has-session -t phone 2>/dev/null || tmux new-session -d -s phone
+if [ -n "$CLAUDE_CMD" ]; then
+  tmux has-session -t claude 2>/dev/null || tmux new-session -d -s claude -x 110 -y 40 "$CLAUDE_CMD"
+fi
 
 cat <<EOF
 

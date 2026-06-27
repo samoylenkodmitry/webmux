@@ -98,15 +98,25 @@ answers is captured as the peer's connection descriptor and every peer call
 in the picker like any PC; tapping one navigates to its `http://<tailnet-ip>:<port>`
 URL to attach.
 
-To put a phone on your fleet, run [`scripts/termux-setup.sh`](../scripts/termux-setup.sh)
-in Termux (needs the Tailscale app + Termux:API/Boot). It installs node/tmux, runs
-webmux bound to the phone's tailnet IP, and optionally installs Claude Code so you
-can run it on the phone and steer it from any other webmux.
+There are two ways to put an Android phone on your fleet:
 
-> Roadmap: a self-contained Android app (`tsnet` node + a bundled userland running
-> webmux + a native Accessibility/MediaProjection control bridge exposed to the
-> on-device agent over MCP) would make a phone a first-class, fully-controllable
-> fleet member without Termux.
+- **WebMux Host app** (recommended) — a self-contained APK ([`android/`](../android/)).
+  Install it, tap **Start**, and a foreground service brings up a glibc userland
+  (static **proot** + a minimal **Debian** rootfs downloaded on first run), inside
+  which it installs Node 20, compiles `node-pty`, runs webmux bound to the phone's
+  Tailscale IP, and installs **current Claude Code**. No Termux, survives reboots.
+  See [`android/README.md`](../android/README.md).
+- **Termux script** — [`scripts/termux-setup.sh`](../scripts/termux-setup.sh) does the
+  same by hand inside Termux (needs the Tailscale app + Termux:API/Boot). Claude runs
+  via `proot-distro` because 2.x has no Android-native binary.
+
+Why the userland: Android forbids executing binaries from app storage, and Claude 2.x
+is a glibc binary with no Android build — so both the app and the script run Claude
+(and, in the app, all of webmux) inside a glibc Debian via proot.
+
+> Roadmap: embed a `tsnet` node so the app is its own tailnet device (no separate
+> Tailscale app), and add a native Accessibility/MediaProjection control bridge exposed
+> to the on-device agent over MCP for full phone control.
 
 ## Fleet update
 

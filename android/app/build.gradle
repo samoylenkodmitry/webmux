@@ -1,0 +1,73 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystoreProps.load(new FileInputStream(keystorePropsFile))
+}
+
+android {
+    namespace 'dev.webmux.host'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "dev.webmux.host"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "0.1"
+    }
+
+    signingConfigs {
+        if (keystorePropsFile.exists()) {
+            release {
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (keystorePropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    packaging {
+        jniLibs {
+            // Extract our bundled proot/loader/libs to nativeLibraryDir as real files
+            // so we can execute proot (Android W^X forbids exec from app data dirs;
+            // nativeLibraryDir is the one writable-by-installer, exec-allowed place).
+            useLegacyPackaging = true
+        }
+        // These are executables / a hand-built loader, not ordinary .so's — never strip.
+        doNotStrip "*/arm64-v8a/libproot.so"
+        doNotStrip "*/arm64-v8a/libproot_loader.so"
+        doNotStrip "*/arm64-v8a/libproot_loader32.so"
+        doNotStrip "*/arm64-v8a/libtalloc.so"
+        doNotStrip "*/arm64-v8a/libandroid-shmem.so"
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    // Rootfs extraction: tar.xz with proper symlink/hardlink/mode handling.
+    implementation 'org.apache.commons:commons-compress:1.26.2'
+    implementation 'org.tukaani:xz:1.9'
+}

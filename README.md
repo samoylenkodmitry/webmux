@@ -93,6 +93,10 @@ Installs a background service on `127.0.0.1:8083` (systemd on Linux, launchd on 
 > [!IMPORTANT]
 > webmux has **no authentication** — anyone who can reach the port gets a shell as you. That's intentional and safe *only* because it binds to `127.0.0.1` and you expose it through your private Tailscale tailnet (which authenticates devices). **Never** bind it to `0.0.0.0`, the public internet, or a `tailscale funnel`. Treat the URL like SSH access to your machine.
 
+## Your Android phone, too — as a fleet *member*
+
+Your phones can host terminals, not just view them. Install the **[WebMux Host](https://github.com/samoylenkodmitry/webmux/releases/latest)** app (sideload the APK), tap **Start**, and the phone runs `tmux` + webmux + **current Claude Code** inside a glibc Debian (via `proot`) and shows up in every other webmux's picker like a PC — open its sessions, steer Claude running *on the phone*, from your laptop. No Termux, survives reboots; it just needs the Tailscale app. arm64 only. Details in **[android/](android/)**.
+
 ## Docs
 
 Configuration, the HTTP/WebSocket API, how the fleet update and activity alerts work, and other internals live in **[docs/TECHNICAL.md](docs/TECHNICAL.md)**.

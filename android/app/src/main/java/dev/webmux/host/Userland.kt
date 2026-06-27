@@ -1,0 +1,255 @@
+package dev.webmux.host
+
+import android.content.Context
+import android.system.Os
+import android.system.OsConstants
+import android.util.Log
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
+import java.io.BufferedInputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
+import java.net.URL
+
+/**
+ * The Linux userland this app hosts: a static (Termux-built) proot plus a minimal
+ * Debian rootfs extracted into app storage. Inside proot it's ordinary glibc Linux,
+ * so node/tmux/webmux/node-pty and current Claude Code all run unmodified.
+ *
+ * proot + its loader + libtalloc + libandroid-shmem ship in the APK as native libs
+ * (jniLibs) so they land in nativeLibraryDir, the one app-writable dir Android still
+ * lets us execute from. The rootfs is data and downloads on first run.
+ */
+class Userland(private val ctx: Context) {
+
+    val nativeLibDir: String = ctx.applicationInfo.nativeLibraryDir
+    val rootfs = File(ctx.filesDir, "debian")
+    private val runtimeLib = File(ctx.filesDir, "runtime/lib")
+    private val tmpDir = File(ctx.filesDir, "tmp")
+    private val shmDir = File(ctx.filesDir, "shm")
+    private val marker = File(rootfs, ".installed")
+
+    val proot get() = "$nativeLibDir/libproot.so"
+
+    fun isInstalled(): Boolean = marker.exists()
+
+    /** Delete the whole rootfs (repair / clean reinstall). Robust over app-owned files. */
+    fun wipe() {
+        if (rootfs.exists()) rootfs.deleteRecursively()
+    }
+
+    /** Idempotent: create the lib symlinks + scratch dirs proot needs. */
+    fun prepareRuntime() {
+        runtimeLib.mkdirs(); tmpDir.mkdirs(); shmDir.mkdirs()
+        // proot's NEEDED soname is libtalloc.so.2; the real file ships as libtalloc.so
+        // in nativeLibDir. Point a versioned symlink at it on LD_LIBRARY_PATH.
+        symlink("$nativeLibDir/libtalloc.so", File(runtimeLib, "libtalloc.so.2"))
+    }
+
+    /** Download + extract the rootfs. Safe to call again (wipes a partial install). */
+    fun install(url: String, log: (String) -> Unit) {
+        prepareRuntime()
+        log("Downloading Debian rootfs…")
+        val tmpTar = File(ctx.cacheDir, "rootfs.tar.xz")
+        URL(url).openStream().use { input ->
+            FileOutputStream(tmpTar).use { out -> input.copyTo(out, 1 shl 16) }
+        }
+        log("Extracting rootfs (~15k files)…")
+        if (rootfs.exists()) rootfs.deleteRecursively()
+        rootfs.mkdirs()
+        tmpTar.inputStream().use { extract(it, log) }
+        tmpTar.delete()
+        writeResolvConf()
+        marker.writeText("debian bookworm\n")
+        log("Rootfs ready.")
+    }
+
+    private fun extract(input: InputStream, log: (String) -> Unit) {
+        TarArchiveInputStream(XZCompressorInputStream(BufferedInputStream(input))).use { tar ->
+            var count = 0
+            var entry = tar.nextTarEntry
+            while (entry != null) {
+                val name = entry.name.removePrefix("./").trimStart('/')
+                if (name.isEmpty() || name == ".") { entry = tar.nextTarEntry; continue }
+                val out = File(rootfs, name)
+                when {
+                    entry.isDirectory -> out.mkdirs()
+                    entry.isSymbolicLink -> {
+                        out.parentFile?.mkdirs()
+                        lremove(out)
+                        Os.symlink(entry.linkName, out.absolutePath)
+                    }
+                    entry.isLink -> { // hardlink
+                        out.parentFile?.mkdirs()
+                        lremove(out)
+                        val target = File(rootfs, entry.linkName.removePrefix("./"))
+                        try { Os.link(target.absolutePath, out.absolutePath) }
+                        catch (e: Exception) { runCatching { target.copyTo(out, overwrite = true) } }
+                    }
+                    entry.isFile -> {
+                        out.parentFile?.mkdirs()
+                        FileOutputStream(out).use { tar.copyTo(it, 1 shl 16) }
+                        runCatching { Os.chmod(out.absolutePath, entry.mode and 0xFFF) }
+                    }
+                    // char/block/fifo devices: skip — proot binds the host /dev.
+                }
+                count++
+                if (count % 3000 == 0) log("…$count files")
+                entry = tar.nextTarEntry
+            }
+            log("Extracted $count entries.")
+        }
+    }
+
+    private fun writeResolvConf() {
+        File(rootfs, "etc").mkdirs()
+        // resolv.conf ships as a dangling symlink to systemd-resolved; replace it with
+        // a real file or writes follow the broken link and ENOENT.
+        val resolv = File(rootfs, "etc/resolv.conf")
+        lremove(resolv)
+        resolv.writeText("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
+        val hostname = File(rootfs, "etc/hostname")
+        lremove(hostname)
+        hostname.writeText("phone\n")
+    }
+
+    /** Build the proot argv that enters the rootfs and runs [guestCmd] as fake-root. */
+    fun prootArgv(
+        guestCmd: List<String>,
+        cwd: String = "/root",
+        guestEnv: List<String> = emptyList(),
+    ): List<String> {
+        val r = rootfs.absolutePath
+        val a = mutableListOf(
+            proot,
+            "--kill-on-exit",
+            "--link2symlink",
+            "-0",
+            "-r", r,
+            "-w", cwd,
+            "-b", "/dev",
+            "-b", "/proc",
+            "-b", "/sys",
+            "-b", "/dev/urandom:/dev/random",
+            "-b", "${shmDir.absolutePath}:/dev/shm",
+            "/usr/bin/env", "-i",
+            "HOME=/root",
+            "TERM=xterm-256color",
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG=C.UTF-8",
+            "DEBIAN_FRONTEND=noninteractive",
+        )
+        a.addAll(guestEnv)
+        a.addAll(guestCmd)
+        return a
+    }
+
+    fun prootEnv(): Map<String, String> = mapOf(
+        "PROOT_LOADER" to "$nativeLibDir/libproot_loader.so",
+        "PROOT_LOADER_32" to "$nativeLibDir/libproot_loader32.so",
+        "PROOT_TMP_DIR" to tmpDir.absolutePath,
+        "LD_LIBRARY_PATH" to "${runtimeLib.absolutePath}:$nativeLibDir",
+        // NB: do NOT set PROOT_NO_SECCOMP — with seccomp off, proot ptrace-handles every
+        // syscall and returns ENOSYS for write-family ones (mkdirat) it doesn't translate.
+        // Default (seccomp on) passes them to the kernel natively, like proot-distro.
+    )
+
+    /** Start a guest command; stdout+stderr merged. Caller drains/​waits. */
+    fun start(
+        guestCmd: List<String>,
+        cwd: String = "/root",
+        guestEnv: List<String> = emptyList(),
+    ): Process {
+        val pb = ProcessBuilder(prootArgv(guestCmd, cwd, guestEnv)).redirectErrorStream(true)
+        pb.environment().putAll(prootEnv())
+        return pb.start()
+    }
+
+    /** Run a guest command to completion, streaming each output line to [onLine]. */
+    fun runStreaming(
+        guestCmd: List<String>,
+        cwd: String = "/root",
+        guestEnv: List<String> = emptyList(),
+        onLine: (String) -> Unit,
+    ): Int {
+        val p = start(guestCmd, cwd, guestEnv)
+        p.inputStream.bufferedReader().forEachLine(onLine)
+        return p.waitFor()
+    }
+
+    /** Run a guest command to completion, streaming output to logcat under [tag]. */
+    fun runLogged(guestCmd: List<String>, tag: String = "webmux", cwd: String = "/root"): Int =
+        runStreaming(guestCmd, cwd) { Log.i(tag, it) }
+
+    // --- webmux bring-up -----------------------------------------------------
+
+    fun isBootstrapped(): Boolean = File(rootfs, "opt/.webmux-bootstrapped").exists()
+
+    /** Force the bootstrap (apt/npm/build) to re-run without wiping the rootfs. */
+    fun clearBootstrap() { File(rootfs, "opt/.webmux-bootstrapped").delete() }
+
+    /** Copy the bundled bootstrap.sh into the rootfs and run it (apt/npm/clone). */
+    fun bootstrap(onLine: (String) -> Unit): Int {
+        val opt = File(rootfs, "opt").apply { mkdirs() }
+        val dst = File(opt, "bootstrap.sh")
+        ctx.assets.open("bootstrap.sh").use { i -> FileOutputStream(dst).use { o -> i.copyTo(o) } }
+        runCatching { Os.chmod(dst.absolutePath, 0b111_101_101) } // 0755
+        return runStreaming(listOf("/bin/bash", "/opt/bootstrap.sh"), cwd = "/opt", onLine = onLine)
+    }
+
+    /**
+     * Launch webmux bound to [ip]:[port]; long-lived, caller drains/monitors. Seeds a
+     * `claude` and a `shell` tmux session IN THE SAME proot before exec'ing node — the
+     * tmux server is then a child of webmux's proot, so proot's --kill-on-exit doesn't
+     * reap it (a separate short-lived proot would take the daemon down with it).
+     */
+    fun startWebmux(ip: String, port: Int = 8083): Process =
+        start(
+            listOf(
+                "/bin/bash", "-lc",
+                // claude's first-run onboarding wants an attached client, so run it but
+                // fall back to a shell (in /root) if it exits — the session always persists.
+                "tmux has-session -t claude 2>/dev/null || " +
+                    "tmux new-session -d -s claude -x 110 -y 40 'cd /root; claude; exec bash -l'; " +
+                    "tmux has-session -t shell 2>/dev/null || tmux new-session -d -s shell -c /root; " +
+                    "cd /opt/webmux && exec node server.js"
+            ),
+            cwd = "/opt/webmux",
+            guestEnv = listOf("HOST=$ip", "PORT=$port", "WEBMUX_TAILSCALE=0"),
+        )
+
+    private fun lremove(f: File) {
+        try {
+            val st = Os.lstat(f.absolutePath)
+            if (OsConstants.S_ISLNK(st.st_mode) || OsConstants.S_ISREG(st.st_mode)) Os.remove(f.absolutePath)
+        } catch (_: Exception) { /* doesn't exist */ }
+    }
+
+    private fun symlink(target: String, link: File) {
+        lremove(link)
+        runCatching { Os.symlink(target, link.absolutePath) }
+    }
+
+    companion object {
+        /** The phone's Tailscale IP (CGNAT 100.64.0.0/10) from the tun interface, or null. */
+        fun findTailnetIp(): String? {
+            return try {
+                java.net.NetworkInterface.getNetworkInterfaces().toList().flatMap {
+                    it.inetAddresses.toList()
+                }.filterIsInstance<java.net.Inet4Address>().map { it.hostAddress ?: "" }
+                    .firstOrNull { ip ->
+                        val o = ip.split(".").mapNotNull { it.toIntOrNull() }
+                        o.size == 4 && o[0] == 100 && o[1] in 64..127
+                    }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        // Pinned rootfs the app downloads on first run. Swapped to the GitHub Release
+        // mirror at publish time; overridable for local testing via BuildConfig/Intent.
+        const val DEFAULT_ROOTFS_URL =
+            "https://github.com/samoylenkodmitry/webmux/releases/download/userland-v1/debian-arm64-rootfs.tar.xz"
+    }
+}
