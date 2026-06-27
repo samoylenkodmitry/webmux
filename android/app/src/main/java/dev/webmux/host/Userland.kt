@@ -216,7 +216,9 @@ class Userland(private val ctx: Context) {
                     "cd /opt/webmux && exec node server.js"
             ),
             cwd = "/opt/webmux",
-            guestEnv = listOf("HOST=$ip", "PORT=$port", "WEBMUX_TAILSCALE=0"),
+            // TAILSCALE=1 so the picker discovers the fleet via learned peers (the box
+            // has no `tailscale` CLI, so webmux learns peers from whoever probes it).
+            guestEnv = listOf("HOST=$ip", "PORT=$port", "WEBMUX_TAILSCALE=1"),
         )
 
     private fun lremove(f: File) {

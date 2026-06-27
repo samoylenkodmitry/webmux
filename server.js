@@ -85,6 +85,7 @@ async function tailscaleStatus() {
     const status = JSON.parse(await runTailscale(['status', '--json', '--self=true']));
     const self = status.Self || {};
     const dns = (self.DNSName || '').replace(/\.$/, '');
+    if (dns) _selfDns = dns; // so our probes can self-identify to phone peers
     const keyExpiry = self.KeyExpiry || '';
     const expiryMs = keyExpiry ? Date.parse(keyExpiry) : NaN;
     const keyExpired = Boolean(self.Expired) || (Number.isFinite(expiryMs) && expiryMs <= Date.now());
@@ -114,13 +115,31 @@ async function tailscaleStatus() {
 function httpsConn(ip, dns) { return { tls: true, host: ip, port: 443, servername: dns, hostHeader: dns, urlBase: `https://${dns}/` }; }
 function httpConn(ip, port) { return { tls: false, host: ip, port, hostHeader: `${ip}:${port}`, urlBase: `http://${ip}:${port}/` }; }
 
+// Zero-config discovery for nodes that can't run `tailscale status` (a phone whose
+// webmux lives in a proot box): every webmux prober tags its requests with its own
+// tailnet name (X-Webmux-Self), so such a node learns its peers from whoever probes
+// it — the fleet is already knocking on its door every discovery cycle. No login,
+// no coordinator. `_selfDns` is our own name (set once we read tailscale status).
+let _selfDns = '';
+const seenPeers = new Map(); // tailnet IP -> { dns, stamp }
+const isTailnetIp = (ip) => {
+  const m = /^(\d+)\.(\d+)\./.exec(ip || '');
+  return Boolean(m) && +m[1] === 100 && +m[2] >= 64 && +m[2] <= 127;
+};
+const SELF_TAILNET_IP = isTailnetIp(process.env.HOST || '') ? process.env.HOST : null;
+function clientTailnetIp(req) {
+  let ip = (req.socket && req.socket.remoteAddress) || '';
+  if (ip.startsWith('::ffff:')) ip = ip.slice(7);
+  return isTailnetIp(ip) ? ip : null;
+}
+
 // One request to a peer over its conn. Resolves { status, body } or null on a
 // connection error / timeout. Body is capped.
 function peerHttp(conn, { method = 'GET', path = '/', body = null, timeoutMs = 4000, maxBytes = 1_000_000 } = {}) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    const headers = { Host: conn.hostHeader };
+    const headers = { Host: conn.hostHeader, 'X-Webmux-Self': _selfDns };
     let payload = null;
     if (body != null) {
       payload = Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
@@ -226,35 +245,57 @@ const PEER_CACHE_MS = 10_000;
 const PEER_HTTP_PORTS = (process.env.WEBMUX_PEER_PORTS || '8083').split(',').map((s) => parseInt(s.trim(), 10)).filter(Boolean);
 let _peersCachePromise = null;
 let _peersCacheStamp = 0;
+// Peers that have probed us recently (the learned-discovery fallback). Pruned to a
+// 2-minute window so a node that goes offline drops out of the picker.
+function learnedNodes() {
+  const cutoff = Date.now() - 120_000;
+  const out = [];
+  for (const [ip, v] of seenPeers) {
+    if (v.stamp < cutoff) { seenPeers.delete(ip); continue; }
+    out.push({ name: v.dns || ip, dns: v.dns || '', ip });
+  }
+  return out;
+}
+
+// Confirm each candidate is a webmux and capture how to reach it. PCs answer over
+// tailscale-serve HTTPS (dial the IP, present the name as SNI+Host); phones over
+// plain HTTP on a port. A learned phone peer may have no name — HTTP-only then.
+async function probeNodes(nodes) {
+  const probes = nodes.map(async (n) => {
+    if (n.dns) {
+      const hc = httpsConn(n.ip, n.dns);
+      if (await probeWebmuxHealth(hc, 2500)) return { name: n.name, dns: n.dns, ip: n.ip, url: hc.urlBase, conn: hc };
+    }
+    for (const port of PEER_HTTP_PORTS) {
+      const pc = httpConn(n.ip, port);
+      if (await probeWebmuxHealth(pc, 1500)) return { name: n.name, dns: n.dns || '', ip: n.ip, url: pc.urlBase, conn: pc };
+    }
+    return null;
+  });
+  return (await Promise.all(probes)).filter(Boolean);
+}
+
 async function tailscalePeers() {
   const now = Date.now();
   if (_peersCachePromise && now - _peersCacheStamp < PEER_CACHE_MS) return _peersCachePromise;
   _peersCacheStamp = now;
   _peersCachePromise = (async () => {
+    let nodes = null;
     try {
       const status = JSON.parse(await runTailscale(['status', '--json']));
       if (status.BackendState && status.BackendState !== 'Running') return [];
-      const nodes = Object.values(status.Peer || {})
+      nodes = Object.values(status.Peer || {})
         .filter((p) => p.Online && !p.Expired && p.InNetworkMap !== false && p.DNSName && Array.isArray(p.TailscaleIPs) && p.TailscaleIPs.length)
         .map((p) => {
           const dns = p.DNSName.replace(/\.$/, '');
           const ip = p.TailscaleIPs.find((a) => a.includes('.')) || p.TailscaleIPs[0];
           return { name: p.HostName || dns, dns, ip };
         });
-      const probes = nodes.map(async (n) => {
-        // PCs answer over tailscale-serve HTTPS; phones over plain HTTP on a port.
-        const hc = httpsConn(n.ip, n.dns);
-        if (await probeWebmuxHealth(hc, 2500)) return { name: n.name, dns: n.dns, ip: n.ip, url: hc.urlBase, conn: hc };
-        for (const port of PEER_HTTP_PORTS) {
-          const pc = httpConn(n.ip, port);
-          if (await probeWebmuxHealth(pc, 1500)) return { name: n.name, dns: n.dns, ip: n.ip, url: pc.urlBase, conn: pc };
-        }
-        return null;
-      });
-      return (await Promise.all(probes)).filter(Boolean);
     } catch {
-      return [];
+      nodes = null; // no tailscale CLI here (a phone's proot box) — learn instead
     }
+    if (!nodes) nodes = learnedNodes();
+    return probeNodes(nodes);
   })();
   return _peersCachePromise;
 }
@@ -828,6 +869,14 @@ async function serveStatic(req, res, url) {
 }
 
 const server = http.createServer(async (req, res) => {
+  // Learn peers from whoever probes us (the X-Webmux-Self tag identifies a webmux
+  // prober and carries its tailnet name). Lets a node with no `tailscale status`
+  // discover the fleet for free.
+  const xself = req.headers['x-webmux-self'];
+  if (xself !== undefined) {
+    const sip = clientTailnetIp(req);
+    if (sip && sip !== SELF_TAILNET_IP) seenPeers.set(sip, { dns: String(xself).replace(/\.$/, ''), stamp: Date.now() });
+  }
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname === '/api/health') {
     let tmuxState;
@@ -851,7 +900,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
     if (!TAILSCALE_ENABLED) return sendJson(res, 200, { enabled: false, self: null, peers: [] });
     const status = await tailscaleStatus();
-    const [self, peers] = await Promise.all([tailscaleSelf(status), status.running ? tailscalePeers() : []]);
+    // Discover when tailscale is running OR when peers have probed us (the phone case).
+    const wantPeers = status.running || seenPeers.size > 0;
+    const [self, peers] = await Promise.all([tailscaleSelf(status), wantPeers ? tailscalePeers() : []]);
     // Drop the internal `conn` descriptor before sending to the browser.
     const publicPeers = peers.map(({ conn, ...p }) => p);
     return sendJson(res, 200, { enabled: true, port: PORT, status, self, peers: publicPeers });
