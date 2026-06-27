@@ -220,7 +220,7 @@ async function loadMachines() {
     });
     nameEl.append(copy);
     row.append(el);
-    const t = { statsEl, spark, url: '/api/stats', key: '/api/stats', last: null };
+    const t = { statsEl, spark, url: '/api/stats', key: '/api/stats', procsUrl: '/api/procs', last: null };
     machineStatsTargets.push(t);
     info.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openMachineDetail(t, label); });
   } else if (issue) {
@@ -240,7 +240,8 @@ async function loadMachines() {
     });
     row.append(el);
     const url = `/api/peer/stats?dns=${encodeURIComponent(p.dns)}&ip=${encodeURIComponent(p.ip)}`;
-    const t = { statsEl, spark, url, key: url, last: null };
+    const procsUrl = `/api/peer/procs?dns=${encodeURIComponent(p.dns)}&ip=${encodeURIComponent(p.ip)}`;
+    const t = { statsEl, spark, url, key: url, procsUrl, last: null };
     machineStatsTargets.push(t);
     info.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openMachineDetail(t, p.name || p.dns); });
     // Probe from THIS device; if unreachable, mark it and offer the hint.
@@ -261,11 +262,19 @@ function fmtUptime(sec) {
   return d ? `${d}d ${h}h` : (h ? `${h}h ${m}m` : `${m}m`);
 }
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-function openMachineDetail(t, name) {
+async function openMachineDetail(t, name) {
   detailTarget = t;
+  t.procs = null; // not yet loaded
   $('machine-detail-name').textContent = name;
   $('machine-detail').hidden = false;
   renderMachineDetail();
+  // Top procs are fetched on demand (ps is too heavy for the routine poll).
+  if (t.procsUrl) {
+    try {
+      const r = await fetch(t.procsUrl, { cache: 'no-store' });
+      if (r.ok && detailTarget === t) { t.procs = (await r.json()).top || []; renderMachineDetail(); }
+    } catch { /* leave as loading */ }
+  }
 }
 function closeMachineDetail() { detailTarget = null; $('machine-detail').hidden = true; }
 function renderMachineDetail() {
@@ -279,10 +288,11 @@ function renderMachineDetail() {
   const rows = [`<div class="md-line"><b>${escapeHtml(fmtStats(s))}</b></div>`];
   if (meta.length) rows.push(`<div class="md-line">${escapeHtml(meta.join('  ·  '))}</div>`);
   if (s.disk && s.disk.total) rows.push(`<div class="md-line">disk ${fmtBytes(s.disk.free)} free of ${fmtBytes(s.disk.total)} (${s.disk.usedPct}% used)</div>`);
-  if (s.top && s.top.length) {
-    rows.push('<div class="md-sub">Top processes</div>');
-    for (const p of s.top) rows.push(`<div class="md-proc"><span>${escapeHtml(p.cmd)}</span><span>${p.cpu}%</span></div>`);
-  }
+  rows.push('<div class="md-sub">Top processes</div>');
+  const top = detailTarget.procs;
+  if (top == null) rows.push('<div class="md-line">loading…</div>');
+  else if (!top.length) rows.push('<div class="md-line">—</div>');
+  else for (const p of top) rows.push(`<div class="md-proc"><span>${escapeHtml(p.cmd)}</span><span>${p.cpu}%</span></div>`);
   body.innerHTML = rows.join('');
 }
 $('machine-detail-close').addEventListener('click', closeMachineDetail);

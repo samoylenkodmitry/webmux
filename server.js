@@ -415,13 +415,17 @@ async function cpuPercent() {
   return dt > 0 ? Math.max(0, Math.min(100, Math.round((1 - di / dt) * 100))) : null;
 }
 // Best-effort GPU utilisation %: NVIDIA via nvidia-smi, else AMD/Intel via the
-// DRM sysfs `gpu_busy_percent`. Returns null when nothing reports it.
+// DRM sysfs `gpu_busy_percent`. Returns null when nothing reports it. We stop
+// trying nvidia-smi once it's clearly absent, so we don't spawn it every poll.
+let _noNvidia = false;
 async function gpuPercent() {
-  try {
-    const { stdout } = await execFileP('nvidia-smi', ['--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'], { encoding: 'utf8', timeout: 1500 });
-    const v = parseInt(stdout.trim().split('\n')[0], 10);
-    if (Number.isFinite(v)) return v;
-  } catch { /* no nvidia */ }
+  if (!_noNvidia) {
+    try {
+      const { stdout } = await execFileP('nvidia-smi', ['--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'], { encoding: 'utf8', timeout: 1500 });
+      const v = parseInt(stdout.trim().split('\n')[0], 10);
+      if (Number.isFinite(v)) return v;
+    } catch (e) { if (e && e.code === 'ENOENT') _noNvidia = true; /* nvidia-smi not installed */ }
+  }
   try {
     for (const d of await readdir('/sys/class/drm')) {
       if (!/^card\d+$/.test(d)) continue;
@@ -479,17 +483,19 @@ async function topProcs() {
   } catch { return []; }
 }
 // Cached so rapid polls (and several browser tabs) don't each pay the CPU sample.
+// NOTE: deliberately excludes top processes — `ps -e` over all of /proc is too
+// heavy for the every-5s poll on slow boxes (it pinned an Orange Pi). Top procs
+// are fetched on demand via /api/procs only when the detail sheet is opened.
 let _statsCache = null, _statsStamp = 0;
 async function machineStats() {
   const now = Date.now();
   if (_statsCache && now - _statsStamp < 2000) return _statsCache;
-  const [cpu, gpu, disk, temp, top] = await Promise.all([cpuPercent(), gpuPercent(), diskFree(), cpuTemp(), topProcs()]);
+  const [cpu, gpu, disk, temp] = await Promise.all([cpuPercent(), gpuPercent(), diskFree(), cpuTemp()]);
   _statsStamp = Date.now();
   _statsCache = {
     host: os.hostname(), cpu, gpu, mem: memPercent(), disk, temp,
     uptime: Math.round(os.uptime()),
     load: os.loadavg().map((x) => Math.round(x * 100) / 100),
-    top,
   };
   return _statsCache;
 }
@@ -874,6 +880,22 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/stats') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
     return sendJson(res, 200, await machineStats());
+  }
+  if (url.pathname === '/api/procs') {
+    // On-demand top processes (runs ps) — only hit when a detail sheet opens, so
+    // it stays off the every-5s stats poll that would overload slow boxes.
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+    return sendJson(res, 200, { top: await topProcs() });
+  }
+  if (url.pathname === '/api/peer/procs') {
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+    if (!TAILSCALE_ENABLED) return sendJson(res, 200, { top: [] });
+    const dns = url.searchParams.get('dns') || '';
+    const ip = url.searchParams.get('ip') || '';
+    const peers = await tailscalePeers();
+    const match = peers.find((p) => p.dns === dns && p.ip === ip);
+    if (!match) return sendJson(res, 404, { error: 'unknown peer' });
+    return sendJson(res, 200, (await fetchPeerJson(ip, dns, '/api/procs', 5000)) || { top: [] });
   }
   if (url.pathname === '/api/peer/stats') {
     // Proxy a peer's stats for the picker's machine row (same peer-allowlist guard).
