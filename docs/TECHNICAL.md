@@ -86,6 +86,28 @@ picker — sessions, stats, health — is **proxied through your local server** 
 browser never has to make cross-origin requests. Tapping a peer navigates to its `…ts.net` URL in the
 same tab; if it can't be reached from your device, the picker shows a one-line `/etc/hosts` workaround.
 
+## Phones (and other non-`serve` nodes) as peers
+
+PC peers are discovered over `tailscale serve` (HTTPS on :443). Devices that can't
+run `tailscale serve` — notably **Android via Termux** — instead run webmux as
+**plain HTTP on their Tailscale IP**, which is fine because WireGuard already
+encrypts the tailnet. Discovery probes each online tailnet node over HTTPS first,
+then falls back to plain HTTP on `WEBMUX_PEER_PORTS` (default `8083`); whichever
+answers is captured as the peer's connection descriptor and every peer call
+(sessions, stats, health, broadcast, snippets, update) uses it. Such peers show up
+in the picker like any PC; tapping one navigates to its `http://<tailnet-ip>:<port>`
+URL to attach.
+
+To put a phone on your fleet, run [`scripts/termux-setup.sh`](../scripts/termux-setup.sh)
+in Termux (needs the Tailscale app + Termux:API/Boot). It installs node/tmux, runs
+webmux bound to the phone's tailnet IP, and optionally installs Claude Code so you
+can run it on the phone and steer it from any other webmux.
+
+> Roadmap: a self-contained Android app (`tsnet` node + a bundled userland running
+> webmux + a native Accessibility/MediaProjection control bridge exposed to the
+> on-device agent over MCP) would make a phone a first-class, fully-controllable
+> fleet member without Termux.
+
 ## Fleet update
 
 Pressing **Update all** updates every *other* box on the tailnet to this PC's version, with a live

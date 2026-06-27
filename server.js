@@ -105,71 +105,65 @@ async function tailscaleStatus() {
   }
 }
 
-// Probe https://<dns>/api/health by connecting to the peer's Tailscale IP and
-// presenting the MagicDNS name via SNI + Host. The serve cert is issued for that
-// name, so TLS still validates — and it works even when *this* node's MagicDNS
-// can't resolve `.ts.net` (a common DNS-integration gap on Linux). Returns the
-// parsed health JSON if it's a webmux instance, else null.
-function probeWebmuxHealth(ip, dns, timeoutMs) {
+// A peer connection descriptor. PC peers sit behind `tailscale serve` (HTTPS on
+// :443, reached by dialing the Tailscale IP with the MagicDNS name as SNI+Host so
+// the serve cert validates even when this node's MagicDNS can't resolve .ts.net).
+// Phones can't run `tailscale serve`, so they run webmux as plain HTTP on their
+// Tailscale IP — fine, because WireGuard already encrypts the tailnet. `conn`
+// captures whichever applies so every peer call works the same way.
+function httpsConn(ip, dns) { return { tls: true, host: ip, port: 443, servername: dns, hostHeader: dns, urlBase: `https://${dns}/` }; }
+function httpConn(ip, port) { return { tls: false, host: ip, port, hostHeader: `${ip}:${port}`, urlBase: `http://${ip}:${port}/` }; }
+
+// One request to a peer over its conn. Resolves { status, body } or null on a
+// connection error / timeout. Body is capped.
+function peerHttp(conn, { method = 'GET', path = '/', body = null, timeoutMs = 4000, maxBytes = 1_000_000 } = {}) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    const req = https.request(
-      { host: ip, port: 443, servername: dns, path: '/api/health', method: 'GET', headers: { Host: dns }, timeout: timeoutMs },
-      (res) => {
-        if (res.statusCode !== 200) { res.resume(); return finish(null); }
-        let body = '';
-        res.setEncoding('utf8');
-        res.on('data', (c) => { body += c; if (body.length > 65536) req.destroy(); });
-        res.on('end', () => {
-          try {
-            const j = JSON.parse(body);
-            finish(j && typeof j === 'object' && 'tmuxBin' in j ? j : null);
-          } catch { finish(null); }
-        });
-      }
-    );
+    const headers = { Host: conn.hostHeader };
+    let payload = null;
+    if (body != null) {
+      payload = Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
+      headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = payload.length;
+    } else if (method === 'POST') {
+      headers['Content-Length'] = 0;
+    }
+    const opts = { host: conn.host, port: conn.port, path, method, headers, timeout: timeoutMs };
+    if (conn.tls && conn.servername) opts.servername = conn.servername;
+    const req = (conn.tls ? https : http).request(opts, (res) => {
+      let b = ''; res.setEncoding('utf8');
+      res.on('data', (c) => { b += c; if (b.length > maxBytes) req.destroy(); });
+      res.on('end', () => finish({ status: res.statusCode, body: b }));
+    });
     req.on('error', () => finish(null));
     req.on('timeout', () => { req.destroy(); finish(null); });
+    if (payload) req.write(payload);
     req.end();
   });
 }
 
-// GET https://<dns><path> from a tailnet peer by dialing its IP with SNI + Host
-// (same trick as probeWebmuxHealth above), returning parsed JSON or null. Used to
-// pull a peer's session list so the picker can group sessions by machine.
-function fetchPeerJson(ip, dns, reqPath, timeoutMs) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    const req = https.request(
-      { host: ip, port: 443, servername: dns, path: reqPath, method: 'GET', headers: { Host: dns }, timeout: timeoutMs },
-      (res) => {
-        if (res.statusCode !== 200) { res.resume(); return finish(null); }
-        let body = '';
-        res.setEncoding('utf8');
-        res.on('data', (c) => { body += c; if (body.length > 1_000_000) req.destroy(); });
-        res.on('end', () => { try { finish(JSON.parse(body)); } catch { finish(null); } });
-      }
-    );
-    req.on('error', () => finish(null));
-    req.on('timeout', () => { req.destroy(); finish(null); });
-    req.end();
-  });
+// Is there a webmux at this conn? Returns its /api/health JSON if so, else null.
+async function probeWebmuxHealth(conn, timeoutMs) {
+  const r = await peerHttp(conn, { path: '/api/health', timeoutMs, maxBytes: 65536 });
+  if (!r || r.status !== 200) return null;
+  try { const j = JSON.parse(r.body); return j && typeof j === 'object' && 'tmuxBin' in j ? j : null; }
+  catch { return null; }
+}
+
+// GET <path> from a peer over its conn, parsed JSON or null. Used to pull a
+// peer's session list / stats so the picker can show every machine.
+async function fetchPeerJson(conn, reqPath, timeoutMs) {
+  const r = await peerHttp(conn, { path: reqPath, timeoutMs });
+  if (!r || r.status !== 200) return null;
+  try { return JSON.parse(r.body); } catch { return null; }
 }
 
 // POST https://<dns>/api/update on a peer to ask it to self-update. Best-effort:
 // resolves true if the peer accepted. Same SNI + Host dialing as the GET helper.
-function postPeerUpdate(ip, dns, timeoutMs) {
-  return new Promise((resolve) => {
-    const req = https.request(
-      { host: ip, port: 443, servername: dns, path: '/api/update', method: 'POST', headers: { Host: dns, 'Content-Length': 0 }, timeout: timeoutMs },
-      (res) => { res.resume(); resolve(res.statusCode === 200); }
-    );
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => { req.destroy(); resolve(false); });
-    req.end();
-  });
+async function postPeerUpdate(conn, timeoutMs) {
+  const r = await peerHttp(conn, { method: 'POST', path: '/api/update', timeoutMs });
+  return Boolean(r && r.status === 200);
 }
 
 // Bootstrap a peer that's too OLD to have /api/update: drive its `/ws/new` the
@@ -177,15 +171,15 @@ function postPeerUpdate(ip, dns, timeoutMs) {
 // installer one-liner into it. The install is wrapped in `nohup … & disown` so it
 // detaches from the throwaway session and survives both the session closing and
 // the service restart it triggers. Resolves true once the command was dispatched.
-function bootstrapPeerViaShell(ip, dns, connectTimeoutMs) {
+function bootstrapPeerViaShell(conn, connectTimeoutMs) {
   return new Promise((resolve) => {
     let settled = false, sent = false;
     const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
     let ws;
     try {
-      ws = new WsClient(`wss://${ip}/ws/new?cols=80&rows=24`, {
-        servername: dns, headers: { Host: dns }, handshakeTimeout: connectTimeoutMs,
-      });
+      const wsOpts = { headers: { Host: conn.hostHeader }, handshakeTimeout: connectTimeoutMs };
+      if (conn.tls && conn.servername) wsOpts.servername = conn.servername;
+      ws = new WsClient(`${conn.tls ? 'wss' : 'ws'}://${conn.host}:${conn.port}/ws/new?cols=80&rows=24`, wsOpts);
     } catch { return resolve(false); }
     const giveUp = setTimeout(() => { try { ws.close(); } catch { /* ignore */ } settle(false); }, connectTimeoutMs + 8000);
     ws.on('message', (data, isBinary) => {
@@ -220,15 +214,16 @@ function bootstrapPeerViaShell(ip, dns, connectTimeoutMs) {
 // Update one peer: prefer the native endpoint (clean, watchable session on newer
 // builds); fall back to driving its shell over /ws/new for builds that predate it.
 async function updatePeer(p) {
-  if (await postPeerUpdate(p.ip, p.dns, 8000)) return { name: p.name, dns: p.dns, ip: p.ip, ok: true, via: 'api' };
-  const ok = await bootstrapPeerViaShell(p.ip, p.dns, 6000);
+  if (await postPeerUpdate(p.conn, 8000)) return { name: p.name, dns: p.dns, ip: p.ip, ok: true, via: 'api' };
+  const ok = await bootstrapPeerViaShell(p.conn, 6000);
   return { name: p.name, dns: p.dns, ip: p.ip, ok, via: ok ? 'shell' : 'fail' };
 }
 
-// Cached peer probe — discovering peers means an HTTPS round-trip to every
-// online tailnet node, so we cache the result for a few seconds rather than
-// hammering on every picker refresh.
+// Cached peer probe — discovering peers means a round-trip to every online tailnet
+// node, so we cache the result for a few seconds rather than hammering on every
+// picker refresh. Ports a phone might run webmux on (plain HTTP); overridable.
 const PEER_CACHE_MS = 10_000;
+const PEER_HTTP_PORTS = (process.env.WEBMUX_PEER_PORTS || '8083').split(',').map((s) => parseInt(s.trim(), 10)).filter(Boolean);
 let _peersCachePromise = null;
 let _peersCacheStamp = 0;
 async function tailscalePeers() {
@@ -239,16 +234,22 @@ async function tailscalePeers() {
     try {
       const status = JSON.parse(await runTailscale(['status', '--json']));
       if (status.BackendState && status.BackendState !== 'Running') return [];
-      const peers = Object.values(status.Peer || {})
+      const nodes = Object.values(status.Peer || {})
         .filter((p) => p.Online && !p.Expired && p.InNetworkMap !== false && p.DNSName && Array.isArray(p.TailscaleIPs) && p.TailscaleIPs.length)
         .map((p) => {
           const dns = p.DNSName.replace(/\.$/, '');
           const ip = p.TailscaleIPs.find((a) => a.includes('.')) || p.TailscaleIPs[0];
-          return { name: p.HostName || dns, dns, ip, url: `https://${dns}/` };
+          return { name: p.HostName || dns, dns, ip };
         });
-      const probes = peers.map(async (p) => {
-        const health = await probeWebmuxHealth(p.ip, p.dns, 2500);
-        return health ? { name: p.name, dns: p.dns, ip: p.ip, url: p.url } : null;
+      const probes = nodes.map(async (n) => {
+        // PCs answer over tailscale-serve HTTPS; phones over plain HTTP on a port.
+        const hc = httpsConn(n.ip, n.dns);
+        if (await probeWebmuxHealth(hc, 2500)) return { name: n.name, dns: n.dns, ip: n.ip, url: hc.urlBase, conn: hc };
+        for (const port of PEER_HTTP_PORTS) {
+          const pc = httpConn(n.ip, port);
+          if (await probeWebmuxHealth(pc, 1500)) return { name: n.name, dns: n.dns, ip: n.ip, url: pc.urlBase, conn: pc };
+        }
+        return null;
       });
       return (await Promise.all(probes)).filter(Boolean);
     } catch {
@@ -523,23 +524,10 @@ async function runCommand(cmd) {
   }
 }
 // POST JSON to a peer (used for broadcast fan-out). Returns parsed JSON or null.
-function postPeerJson(ip, dns, reqPath, bodyObj, timeoutMs) {
-  return new Promise((resolve) => {
-    const body = Buffer.from(JSON.stringify(bodyObj || {}), 'utf8');
-    let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    const req = https.request(
-      { host: ip, port: 443, servername: dns, path: reqPath, method: 'POST', headers: { Host: dns, 'Content-Type': 'application/json', 'Content-Length': body.length }, timeout: timeoutMs },
-      (res) => {
-        let b = ''; res.setEncoding('utf8');
-        res.on('data', (c) => { b += c; if (b.length > 1_000_000) req.destroy(); });
-        res.on('end', () => { if (res.statusCode !== 200) return finish(null); try { finish(JSON.parse(b)); } catch { finish(null); } });
-      }
-    );
-    req.on('error', () => finish(null));
-    req.on('timeout', () => { req.destroy(); finish(null); });
-    req.write(body); req.end();
-  });
+async function postPeerJson(conn, reqPath, bodyObj, timeoutMs) {
+  const r = await peerHttp(conn, { method: 'POST', path: reqPath, body: bodyObj || {}, timeoutMs });
+  if (!r || r.status !== 200) return null;
+  try { return JSON.parse(r.body); } catch { return null; }
 }
 
 const HOST = process.env.HOST || '127.0.0.1';
@@ -864,7 +852,9 @@ const server = http.createServer(async (req, res) => {
     if (!TAILSCALE_ENABLED) return sendJson(res, 200, { enabled: false, self: null, peers: [] });
     const status = await tailscaleStatus();
     const [self, peers] = await Promise.all([tailscaleSelf(status), status.running ? tailscalePeers() : []]);
-    return sendJson(res, 200, { enabled: true, port: PORT, status, self, peers });
+    // Drop the internal `conn` descriptor before sending to the browser.
+    const publicPeers = peers.map(({ conn, ...p }) => p);
+    return sendJson(res, 200, { enabled: true, port: PORT, status, self, peers: publicPeers });
   }
   if (url.pathname === '/api/peer/sessions') {
     // Proxy a peer's session list so the picker can group sessions by machine
@@ -877,7 +867,7 @@ const server = http.createServer(async (req, res) => {
     const peers = await tailscalePeers();
     const match = peers.find((p) => p.dns === dns && p.ip === ip);
     if (!match) return sendJson(res, 404, { error: 'unknown peer' });
-    const data = await fetchPeerJson(ip, dns, '/api/sessions', 4000);
+    const data = await fetchPeerJson(match.conn, '/api/sessions', 4000);
     return sendJson(res, 200, { sessions: (data && data.sessions) || [] });
   }
   if (url.pathname === '/api/peer/health') {
@@ -890,7 +880,7 @@ const server = http.createServer(async (req, res) => {
     const peers = await tailscalePeers();
     const match = peers.find((p) => p.dns === dns && p.ip === ip);
     if (!match) return sendJson(res, 404, { error: 'unknown peer' });
-    const data = await fetchPeerJson(ip, dns, '/api/health', 4000);
+    const data = await fetchPeerJson(match.conn, '/api/health', 4000);
     return sendJson(res, 200, { reachable: Boolean(data), version: (data && data.version) || '', ok: Boolean(data && data.ok) });
   }
   if (url.pathname === '/api/stats') {
@@ -911,7 +901,7 @@ const server = http.createServer(async (req, res) => {
     const peers = await tailscalePeers();
     const match = peers.find((p) => p.dns === dns && p.ip === ip);
     if (!match) return sendJson(res, 404, { error: 'unknown peer' });
-    return sendJson(res, 200, (await fetchPeerJson(ip, dns, '/api/procs', 5000)) || { top: [] });
+    return sendJson(res, 200, (await fetchPeerJson(match.conn, '/api/procs', 5000)) || { top: [] });
   }
   if (url.pathname === '/api/peer/stats') {
     // Proxy a peer's stats for the picker's machine row (same peer-allowlist guard).
@@ -922,7 +912,7 @@ const server = http.createServer(async (req, res) => {
     const peers = await tailscalePeers();
     const match = peers.find((p) => p.dns === dns && p.ip === ip);
     if (!match) return sendJson(res, 404, { error: 'unknown peer' });
-    return sendJson(res, 200, (await fetchPeerJson(ip, dns, '/api/stats', 4000)) || {});
+    return sendJson(res, 200, (await fetchPeerJson(match.conn, '/api/stats', 4000)) || {});
   }
   if (url.pathname === '/api/broadcast') {
     // Run a shell command on this machine (scope=self) or on the whole fleet
@@ -940,7 +930,7 @@ const server = http.createServer(async (req, res) => {
         const status = await tailscaleStatus();
         const list = status.running ? await tailscalePeers() : [];
         peerResults = await Promise.all(list.map(async (p) => {
-          const r = await postPeerJson(p.ip, p.dns, '/api/broadcast', { cmd }, 24000);
+          const r = await postPeerJson(p.conn, '/api/broadcast', { cmd }, 24000);
           const one = r && Array.isArray(r.results) && r.results[0];
           return one ? { ...one, host: one.host || p.name } : { host: p.name, ok: false, output: 'unreachable or too old to support broadcast' };
         }));
@@ -962,7 +952,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const status = await tailscaleStatus();
         const list = status.running ? await tailscalePeers() : [];
-        peers = await Promise.all(list.map(async (p) => ({ name: p.name, ok: Boolean(await postPeerJson(p.ip, p.dns, '/api/snippets', { snippets }, 8000)) })));
+        peers = await Promise.all(list.map(async (p) => ({ name: p.name, ok: Boolean(await postPeerJson(p.conn, '/api/snippets', { snippets }, 8000)) })));
       } catch { /* best effort */ }
     }
     return sendJson(res, 200, { ok: true, snippets, peers });

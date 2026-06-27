@@ -244,8 +244,10 @@ async function loadMachines() {
     const t = { statsEl, spark, url, key: url, procsUrl, last: null };
     machineStatsTargets.push(t);
     info.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openMachineDetail(t, p.name || p.dns); });
-    // Probe from THIS device; if unreachable, mark it and offer the hint.
-    probeReachable(p.url).then((ok) => {
+    // Probe from THIS device; if unreachable, mark it and offer the hint. Skip
+    // plain-HTTP peers (phones): a no-cors probe from the HTTPS app is
+    // mixed-content-blocked, which would falsely mark them unreachable.
+    if (p.url.startsWith('https://')) probeReachable(p.url).then((ok) => {
       if (!ok) { el.classList.add('unreachable'); el.dataset.unreachable = '1'; }
     });
   }
