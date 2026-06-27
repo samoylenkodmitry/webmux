@@ -63,7 +63,10 @@ else
 fi
 
 echo "BOOT: install current Claude Code"
+# Force a clean (re)install so a prior link2symlink-broken native binary is replaced.
+npm uninstall -g @anthropic-ai/claude-code >/dev/null 2>&1 || true
 npm install -g @anthropic-ai/claude-code || echo "BOOT: claude install failed (continuing without it)"
+command -v claude >/dev/null 2>&1 && claude --version >/dev/null 2>&1 && echo "BOOT: claude ok ($(claude --version 2>&1 | head -1))" || echo "BOOT: claude NOT runnable"
 
 echo "BOOT: install phone-control CLI + Claude guide"
 install -d /usr/local/bin

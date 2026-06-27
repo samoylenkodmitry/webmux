@@ -124,7 +124,10 @@ class Userland(private val ctx: Context) {
         val a = mutableListOf(
             proot,
             "--kill-on-exit",
-            "--link2symlink",
+            // No --link2symlink: Android app storage is ext4/f2fs with real hardlinks,
+            // and link2symlink turns hardlinks into symlinks-to-a-shared-file — which
+            // breaks Claude's native-binary install (its installer deletes a temp copy
+            // expecting hardlink semantics, taking the shared file with it).
             "-0",
             "-r", r,
             "-w", cwd,
