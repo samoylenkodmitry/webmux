@@ -119,15 +119,17 @@ class Userland(private val ctx: Context) {
         guestCmd: List<String>,
         cwd: String = "/root",
         guestEnv: List<String> = emptyList(),
+        link2symlink: Boolean = false,
     ): List<String> {
         val r = rootfs.absolutePath
-        val a = mutableListOf(
-            proot,
-            "--kill-on-exit",
-            // No --link2symlink: Android app storage is ext4/f2fs with real hardlinks,
-            // and link2symlink turns hardlinks into symlinks-to-a-shared-file — which
-            // breaks Claude's native-binary install (its installer deletes a temp copy
-            // expecting hardlink semantics, taking the shared file with it).
+        val a = mutableListOf(proot, "--kill-on-exit")
+        // link2symlink makes apt/dpkg's hardlink ops work under proot, but it turns
+        // hardlinks into symlinks-to-a-shared-file, which BREAKS Claude's hardlinked
+        // native binary (its installer deletes a temp copy expecting hardlink semantics
+        // and the shared file goes with it). So: ON only for the apt phase, OFF for the
+        // rest. Android /data is ext4/f2fs with real hardlinks, fine for everything else.
+        if (link2symlink) a.add("--link2symlink")
+        a.addAll(listOf(
             "-0",
             "-r", r,
             "-w", cwd,
@@ -145,7 +147,7 @@ class Userland(private val ctx: Context) {
             // proot fakes root (-0); Claude Code blocks --dangerously-skip-permissions
             // as root unless it believes it's sandboxed. The proot box is exactly that.
             "IS_SANDBOX=1",
-        )
+        ))
         a.addAll(guestEnv)
         a.addAll(guestCmd)
         return a
@@ -166,8 +168,9 @@ class Userland(private val ctx: Context) {
         guestCmd: List<String>,
         cwd: String = "/root",
         guestEnv: List<String> = emptyList(),
+        link2symlink: Boolean = false,
     ): Process {
-        val pb = ProcessBuilder(prootArgv(guestCmd, cwd, guestEnv)).redirectErrorStream(true)
+        val pb = ProcessBuilder(prootArgv(guestCmd, cwd, guestEnv, link2symlink)).redirectErrorStream(true)
         pb.environment().putAll(prootEnv())
         return pb.start()
     }
@@ -177,9 +180,10 @@ class Userland(private val ctx: Context) {
         guestCmd: List<String>,
         cwd: String = "/root",
         guestEnv: List<String> = emptyList(),
+        link2symlink: Boolean = false,
         onLine: (String) -> Unit,
     ): Int {
-        val p = start(guestCmd, cwd, guestEnv)
+        val p = start(guestCmd, cwd, guestEnv, link2symlink)
         p.inputStream.bufferedReader().forEachLine(onLine)
         return p.waitFor()
     }
@@ -195,13 +199,24 @@ class Userland(private val ctx: Context) {
     /** Force the bootstrap (apt/npm/build) to re-run without wiping the rootfs. */
     fun clearBootstrap() { File(rootfs, "opt/.webmux-bootstrapped").delete() }
 
-    /** Copy the bundled bootstrap.sh into the rootfs and run it (apt/npm/clone). */
+    /**
+     * Bootstrap in two proot passes: apt WITH --link2symlink (dpkg's hardlink ops fail
+     * under proot without it), then everything else WITHOUT it (it breaks Claude's
+     * native binary). Phase 1 installs the toolchain; phase 2 (bootstrap.sh) does
+     * node/webmux/node-pty/claude/MCP.
+     */
     fun bootstrap(onLine: (String) -> Unit): Int {
         val opt = File(rootfs, "opt").apply { mkdirs() }
         val dst = File(opt, "bootstrap.sh")
         ctx.assets.open("bootstrap.sh").use { i -> FileOutputStream(dst).use { o -> i.copyTo(o) } }
         runCatching { Os.chmod(dst.absolutePath, 0b111_101_101) } // 0755
-        return runStreaming(listOf("/bin/bash", "/opt/bootstrap.sh"), cwd = "/opt", onLine = onLine)
+        val aptRc = runStreaming(
+            listOf("/bin/bash", "-lc", APT_PHASE), cwd = "/opt", link2symlink = true, onLine = onLine
+        )
+        if (aptRc != 0) return aptRc
+        return runStreaming(
+            listOf("/bin/bash", "/opt/bootstrap.sh"), cwd = "/opt", link2symlink = false, onLine = onLine
+        )
     }
 
     /**
@@ -254,6 +269,19 @@ class Userland(private val ctx: Context) {
                 null
             }
         }
+
+        // Phase-1 of bootstrap: the apt/dpkg part, run WITH --link2symlink. Disables
+        // apt's _apt sandbox (can't setresuid under proot) and installs the toolchain.
+        const val APT_PHASE = """
+mkdir -p /etc/apt/apt.conf.d
+echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/00sandbox-off
+export DEBIAN_FRONTEND=noninteractive
+echo "BOOT: apt update"
+apt-get update -y
+echo "BOOT: apt install build tools"
+apt-get install -y --no-install-recommends ca-certificates git curl xz-utils procps python3 make g++ tmux
+echo "BOOT: apt done"
+"""
 
         // Pinned rootfs the app downloads on first run. Swapped to the GitHub Release
         // mirror at publish time; overridable for local testing via BuildConfig/Intent.

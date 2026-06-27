@@ -10,19 +10,9 @@ WEBMUX_DIR=/opt/webmux
 REPO="${WEBMUX_REPO:-https://github.com/samoylenkodmitry/webmux}"
 NODE_VER="${NODE_VER:-v20.18.1}"   # official glibc arm64 build — newer/robust npm 10
 
-# Under proot, apt's http method can't setresuid() down to the _apt sandbox user
-# ("Operation not permitted"). Tell apt to stay root, like proot-distro does.
-mkdir -p /etc/apt/apt.conf.d
-echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/00sandbox-off
-
-echo "BOOT: apt update"
-apt-get update -y
-
-# Just the build toolchain — NOT Debian's nodejs/npm (old npm 9 crashes under proot
-# and drags in ~400 MB of node-* packages). We use the official Node tarball instead.
-echo "BOOT: apt install build tools"
-apt-get install -y --no-install-recommends \
-  ca-certificates git curl xz-utils procps python3 make g++ tmux
+# NOTE: the apt/dpkg toolchain install runs as a SEPARATE proot pass WITH
+# --link2symlink (see Userland.APT_PHASE) because dpkg's hardlink ops need it; this
+# script runs WITHOUT it (link2symlink breaks Claude's hardlinked native binary).
 
 if [ ! -x /usr/local/bin/node ]; then
   echo "BOOT: install Node $NODE_VER"
