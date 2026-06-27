@@ -139,9 +139,11 @@ html, body {
 
 .empty, .status { color: var(--muted); text-align: center; padding: 16px; }
 .status { font-size: 13px; min-height: 20px; }
-.app-foot { text-align: center; padding: 4px 12px max(8px, env(safe-area-inset-bottom)); }
+.app-foot { display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; padding: 6px 12px max(8px, env(safe-area-inset-bottom)); }
 .app-foot a { color: var(--muted); font-size: 12px; text-decoration: none; }
 .app-foot a:hover { color: var(--accent); }
+.app-foot a.get-android { border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px; color: var(--fg); }
+.app-foot a.get-android:hover { border-color: var(--accent); color: var(--accent); }
 
 /* Terminal */
 .term-name {
