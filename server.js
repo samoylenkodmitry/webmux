@@ -445,15 +445,95 @@ function memPercent() {
   const total = os.totalmem();
   return total ? Math.round((1 - os.freemem() / total) * 100) : null;
 }
+async function cpuTemp() {
+  if (process.platform !== 'linux') return null;
+  try {
+    let cpu = null, fallback = null;
+    for (const d of await readdir('/sys/class/thermal')) {
+      if (!/^thermal_zone\d+$/.test(d)) continue;
+      let type = '', v = NaN;
+      try { type = (await readFile(`/sys/class/thermal/${d}/type`, 'utf8')).trim().toLowerCase(); } catch { /* no type */ }
+      try { v = parseInt(await readFile(`/sys/class/thermal/${d}/temp`, 'utf8'), 10); } catch { /* no temp */ }
+      if (!Number.isFinite(v) || v <= 0 || v >= 200000) continue;
+      const c = Math.round(v / 1000);
+      // Prefer a CPU/package zone; otherwise fall back to the hottest sensor.
+      if (/cpu|coretemp|x86_pkg|package|k10temp|zenpower|tctl|tdie/.test(type)) cpu = cpu == null ? c : Math.max(cpu, c);
+      fallback = Math.max(fallback ?? 0, c);
+    }
+    return cpu != null ? cpu : fallback;
+  } catch { return null; }
+}
+// Top processes by CPU (name + %). Linux/macOS ps differ on the all-processes flag.
+async function topProcs() {
+  try {
+    const args = process.platform === 'darwin' ? ['-A', '-o', 'pcpu=,comm=', '-r'] : ['-eo', 'pcpu=,comm=', '--sort=-pcpu'];
+    const { stdout } = await execFileP('ps', args, { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+    const out = [];
+    for (const line of stdout.split('\n')) {
+      const m = line.trim().match(/^([\d.]+)\s+(.+)$/);
+      if (!m) continue;
+      out.push({ cpu: Math.round(parseFloat(m[1]) * 10) / 10, cmd: m[2].split('/').pop() });
+      if (out.length >= 5) break;
+    }
+    return out;
+  } catch { return []; }
+}
 // Cached so rapid polls (and several browser tabs) don't each pay the CPU sample.
 let _statsCache = null, _statsStamp = 0;
 async function machineStats() {
   const now = Date.now();
   if (_statsCache && now - _statsStamp < 2000) return _statsCache;
-  const [cpu, gpu, disk] = await Promise.all([cpuPercent(), gpuPercent(), diskFree()]);
+  const [cpu, gpu, disk, temp, top] = await Promise.all([cpuPercent(), gpuPercent(), diskFree(), cpuTemp(), topProcs()]);
   _statsStamp = Date.now();
-  _statsCache = { host: os.hostname(), cpu, gpu, mem: memPercent(), disk };
+  _statsCache = {
+    host: os.hostname(), cpu, gpu, mem: memPercent(), disk, temp,
+    uptime: Math.round(os.uptime()),
+    load: os.loadavg().map((x) => Math.round(x * 100) / 100),
+    top,
+  };
   return _statsCache;
+}
+
+// Read a JSON request body (small, capped). Used by POST endpoints with payloads.
+function readBody(req, max = 65536) {
+  return new Promise((resolve) => {
+    let b = '';
+    req.setEncoding('utf8');
+    req.on('data', (c) => { b += c; if (b.length > max) req.destroy(); });
+    req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } });
+    req.on('error', () => resolve({}));
+  });
+}
+// Run a shell command (broadcast), capturing combined output (bounded + timed).
+async function runCommand(cmd) {
+  const host = os.hostname();
+  if (!cmd || typeof cmd !== 'string') return { host, ok: false, output: 'no command' };
+  try {
+    const { stdout, stderr } = await execFileP('sh', ['-c', cmd], { encoding: 'utf8', timeout: 20000, maxBuffer: 256 * 1024, cwd: HOME || process.cwd(), env: process.env });
+    return { host, ok: true, code: 0, output: (stdout + (stderr ? (stdout ? '\n' : '') + stderr : '')).slice(0, 8000) };
+  } catch (e) {
+    const out = (String(e.stdout || '') + String(e.stderr || '')).slice(0, 8000) || (e.killed ? 'timed out' : (e.message || 'failed'));
+    return { host, ok: false, code: e.code ?? 1, output: out };
+  }
+}
+// POST JSON to a peer (used for broadcast fan-out). Returns parsed JSON or null.
+function postPeerJson(ip, dns, reqPath, bodyObj, timeoutMs) {
+  return new Promise((resolve) => {
+    const body = Buffer.from(JSON.stringify(bodyObj || {}), 'utf8');
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const req = https.request(
+      { host: ip, port: 443, servername: dns, path: reqPath, method: 'POST', headers: { Host: dns, 'Content-Type': 'application/json', 'Content-Length': body.length }, timeout: timeoutMs },
+      (res) => {
+        let b = ''; res.setEncoding('utf8');
+        res.on('data', (c) => { b += c; if (b.length > 1_000_000) req.destroy(); });
+        res.on('end', () => { if (res.statusCode !== 200) return finish(null); try { finish(JSON.parse(b)); } catch { finish(null); } });
+      }
+    );
+    req.on('error', () => finish(null));
+    req.on('timeout', () => { req.destroy(); finish(null); });
+    req.write(body); req.end();
+  });
 }
 
 const HOST = process.env.HOST || '127.0.0.1';
@@ -745,6 +825,30 @@ const server = http.createServer(async (req, res) => {
     const match = peers.find((p) => p.dns === dns && p.ip === ip);
     if (!match) return sendJson(res, 404, { error: 'unknown peer' });
     return sendJson(res, 200, (await fetchPeerJson(ip, dns, '/api/stats', 4000)) || {});
+  }
+  if (url.pathname === '/api/broadcast') {
+    // Run a shell command on this machine (scope=self) or on the whole fleet
+    // (scope=all: this box + every tailnet peer, which each run it via scope=self).
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+    const scope = url.searchParams.get('scope') || 'self';
+    const body = await readBody(req);
+    const cmd = typeof body.cmd === 'string' ? body.cmd : '';
+    if (!cmd.trim()) return sendJson(res, 400, { error: 'no command' });
+    const selfResult = await runCommand(cmd);
+    if (scope !== 'all') return sendJson(res, 200, { results: [selfResult] });
+    let peerResults = [];
+    if (TAILSCALE_ENABLED) {
+      try {
+        const status = await tailscaleStatus();
+        const list = status.running ? await tailscalePeers() : [];
+        peerResults = await Promise.all(list.map(async (p) => {
+          const r = await postPeerJson(p.ip, p.dns, '/api/broadcast', { cmd }, 24000);
+          const one = r && Array.isArray(r.results) && r.results[0];
+          return one ? { ...one, host: one.host || p.name } : { host: p.name, ok: false, output: 'unreachable or too old to support broadcast' };
+        }));
+      } catch { /* best effort */ }
+    }
+    return sendJson(res, 200, { results: [selfResult, ...peerResults] });
   }
   if (url.pathname === '/api/update') {
     if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });

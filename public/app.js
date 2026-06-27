@@ -128,12 +128,35 @@ function fmtStats(s) {
   if (s.disk && s.disk.free != null) p.push(`/ ${fmtBytes(s.disk.free)} free`);
   return p.join(' · ');
 }
+const statHistory = {}; // key -> recent cpu samples, for the sparkline
+function pushHistory(key, v) {
+  const a = statHistory[key] || (statHistory[key] = []);
+  a.push(v);
+  if (a.length > 40) a.shift();
+}
+function drawSpark(canvas, data) {
+  const c = canvas.getContext && canvas.getContext('2d');
+  if (!c) return;
+  const w = canvas.width, h = canvas.height;
+  c.clearRect(0, 0, w, h);
+  if (!data || data.length < 2) return;
+  const pt = (i) => [(i / (data.length - 1)) * w, h - (Math.max(0, Math.min(100, data[i])) / 100) * (h - 3) - 1.5];
+  c.beginPath();
+  data.forEach((_, i) => { const [x, y] = pt(i); i ? c.lineTo(x, y) : c.moveTo(x, y); });
+  c.strokeStyle = '#2f81f7'; c.lineWidth = 1.5; c.stroke();
+  c.lineTo(w, h); c.lineTo(0, h); c.closePath();
+  c.fillStyle = 'rgba(47,129,247,0.15)'; c.fill();
+}
 async function refreshMachineStats() {
   await Promise.all(machineStatsTargets.map(async (t) => {
     let s = null;
     try { const r = await fetch(t.url, { cache: 'no-store' }); if (r.ok) s = await r.json(); } catch { /* unreachable */ }
+    t.last = s;
+    if (s && s.cpu != null) pushHistory(t.key, s.cpu);
     if (t.statsEl.isConnected) t.statsEl.textContent = fmtStats(s);
+    if (t.spark) drawSpark(t.spark, statHistory[t.key] || []);
   }));
+  if (detailTarget && !$('machine-detail').hidden) renderMachineDetail();
 }
 function startStatsPolling() {
   if (statsTimer) return;
@@ -151,12 +174,20 @@ function machineCard(tag, labelText) {
   const label = document.createElement('span');
   label.className = 'machine-label';
   label.textContent = labelText;
-  nameEl.append(label);
+  const info = document.createElement('button');
+  info.className = 'machine-info';
+  info.textContent = 'ⓘ';
+  info.title = 'Details';
+  info.addEventListener('pointerdown', (e) => e.preventDefault());
+  nameEl.append(label, info);
   const statsEl = document.createElement('span');
   statsEl.className = 'machine-stats';
   statsEl.textContent = '…';
-  el.append(nameEl, statsEl);
-  return { el, nameEl, statsEl };
+  const spark = document.createElement('canvas');
+  spark.className = 'machine-spark';
+  spark.width = 240; spark.height = 36;
+  el.append(nameEl, statsEl, spark);
+  return { el, nameEl, statsEl, spark, info };
 }
 async function loadMachines() {
   const wrap = $('machines'), row = $('machines-row'), hint = $('machine-hint');
@@ -173,7 +204,8 @@ async function loadMachines() {
   machineStatsTargets = [];
 
   if (data.self && data.self.url) {
-    const { el, nameEl, statsEl } = machineCard('span', (data.self.dns || '').split('.')[0] || 'this');
+    const label = (data.self.dns || '').split('.')[0] || 'this';
+    const { el, nameEl, statsEl, spark, info } = machineCard('span', label);
     el.classList.add('current');
     if (issue) { el.classList.add('unreachable'); el.title = issue.message; }
     const copy = document.createElement('button');
@@ -188,24 +220,29 @@ async function loadMachines() {
     });
     nameEl.append(copy);
     row.append(el);
-    machineStatsTargets.push({ statsEl, url: '/api/stats' });
+    const t = { statsEl, spark, url: '/api/stats', key: '/api/stats', last: null };
+    machineStatsTargets.push(t);
+    info.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openMachineDetail(t, label); });
   } else if (issue) {
     const { el } = machineCard('span', 'this PC');
     el.classList.add('current', 'unreachable');
     el.title = issue.message;
     row.append(el);
-    machineStatsTargets.push({ statsEl: el.querySelector('.machine-stats'), url: '/api/stats' });
+    machineStatsTargets.push({ statsEl: el.querySelector('.machine-stats'), spark: el.querySelector('.machine-spark'), url: '/api/stats', key: '/api/stats', last: null });
   }
 
   for (const p of peers) {
-    const { el } = machineCard('a', p.name || p.dns);
+    const { el, statsEl, spark, info } = machineCard('a', p.name || p.dns);
     el.href = p.url;                 // same-tab navigation (no target=_blank)
     el.title = p.dns;
     el.addEventListener('click', (e) => {
       if (el.dataset.unreachable === '1') { e.preventDefault(); showMachineHint(p); }
     });
     row.append(el);
-    machineStatsTargets.push({ statsEl: el.querySelector('.machine-stats'), url: `/api/peer/stats?dns=${encodeURIComponent(p.dns)}&ip=${encodeURIComponent(p.ip)}` });
+    const url = `/api/peer/stats?dns=${encodeURIComponent(p.dns)}&ip=${encodeURIComponent(p.ip)}`;
+    const t = { statsEl, spark, url, key: url, last: null };
+    machineStatsTargets.push(t);
+    info.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openMachineDetail(t, p.name || p.dns); });
     // Probe from THIS device; if unreachable, mark it and offer the hint.
     probeReachable(p.url).then((ok) => {
       if (!ok) { el.classList.add('unreachable'); el.dataset.unreachable = '1'; }
@@ -216,6 +253,82 @@ async function loadMachines() {
   refreshMachineStats();
   startStatsPolling();
 }
+
+// --- machine detail (top procs / temp / uptime / load) --------------------
+let detailTarget = null;
+function fmtUptime(sec) {
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+  return d ? `${d}d ${h}h` : (h ? `${h}h ${m}m` : `${m}m`);
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function openMachineDetail(t, name) {
+  detailTarget = t;
+  $('machine-detail-name').textContent = name;
+  $('machine-detail').hidden = false;
+  renderMachineDetail();
+}
+function closeMachineDetail() { detailTarget = null; $('machine-detail').hidden = true; }
+function renderMachineDetail() {
+  const body = $('machine-detail-body');
+  const s = detailTarget && detailTarget.last;
+  if (!s) { body.textContent = 'Loading…'; return; }
+  const meta = [];
+  if (s.uptime != null) meta.push('up ' + fmtUptime(s.uptime));
+  if (s.temp != null) meta.push(s.temp + '°C');
+  if (s.load) meta.push('load ' + s.load.join(' '));
+  const rows = [`<div class="md-line"><b>${escapeHtml(fmtStats(s))}</b></div>`];
+  if (meta.length) rows.push(`<div class="md-line">${escapeHtml(meta.join('  ·  '))}</div>`);
+  if (s.disk && s.disk.total) rows.push(`<div class="md-line">disk ${fmtBytes(s.disk.free)} free of ${fmtBytes(s.disk.total)} (${s.disk.usedPct}% used)</div>`);
+  if (s.top && s.top.length) {
+    rows.push('<div class="md-sub">Top processes</div>');
+    for (const p of s.top) rows.push(`<div class="md-proc"><span>${escapeHtml(p.cmd)}</span><span>${p.cpu}%</span></div>`);
+  }
+  body.innerHTML = rows.join('');
+}
+$('machine-detail-close').addEventListener('click', closeMachineDetail);
+$('machine-detail').addEventListener('click', (e) => { if (e.target === $('machine-detail')) closeMachineDetail(); });
+
+// --- broadcast a command to the whole fleet -------------------------------
+function openBroadcast() {
+  $('broadcast-results').innerHTML = '';
+  $('broadcast-cmd').value = '';
+  $('broadcast').hidden = false;
+  setTimeout(() => $('broadcast-cmd').focus(), 50);
+}
+function closeBroadcast() { $('broadcast').hidden = true; }
+async function runBroadcast() {
+  const cmd = $('broadcast-cmd').value.trim();
+  if (!cmd) return;
+  const ok = await askConfirm({ title: 'Run on all PCs', message: `Run "${cmd}" on this PC and every tailnet peer?`, okLabel: 'Run', danger: true });
+  if (!ok) return;
+  const resEl = $('broadcast-results');
+  resEl.innerHTML = '<div class="md-sub">Running…</div>';
+  try {
+    const r = await fetch('/api/broadcast?scope=all', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cmd }) });
+    const j = await r.json();
+    resEl.innerHTML = '';
+    for (const res of (j.results || [])) {
+      const block = document.createElement('div');
+      block.className = 'bc-result' + (res.ok ? '' : ' bad');
+      const head = document.createElement('div');
+      head.className = 'bc-host';
+      head.textContent = `${res.host || '?'} ${res.ok ? '✓' : '✗'}`;
+      const pre = document.createElement('pre');
+      pre.className = 'bc-out';
+      pre.textContent = res.output || '(no output)';
+      block.append(head, pre);
+      resEl.append(block);
+    }
+    if (!j.results || !j.results.length) resEl.innerHTML = '<div class="md-sub">No results.</div>';
+  } catch (e) {
+    resEl.innerHTML = '<div class="md-sub">Failed: ' + escapeHtml(e.message || String(e)) + '</div>';
+  }
+}
+$('broadcast-btn').addEventListener('click', openBroadcast);
+$('broadcast-close').addEventListener('click', closeBroadcast);
+$('broadcast').addEventListener('click', (e) => { if (e.target === $('broadcast')) closeBroadcast(); });
+$('broadcast-run').addEventListener('click', runBroadcast);
+$('broadcast-cmd').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); runBroadcast(); } });
 
 function tailnetIssue(data) {
   const status = data.status || {};
@@ -678,6 +791,8 @@ function setSessionLabel(text) {
 // Open from the picker: show the terminal view, then (re)attach. opts.dir starts
 // a new session in that directory (used by the "recent directories" list).
 function openSession(mode, name, opts = {}) {
+  closeMachineDetail();
+  closeBroadcast();
   ensureTerm();
   pickerView.hidden = true;
   termView.hidden = false;

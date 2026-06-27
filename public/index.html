@@ -23,6 +23,7 @@
       <h1>tmux sessions</h1>
       <div class="bar-actions">
         <button id="refresh" class="btn" title="Refresh">↻</button>
+        <button id="broadcast-btn" class="btn" title="Run a command on all PCs">⇉</button>
         <button id="new" class="btn btn-primary">＋ New</button>
       </div>
     </header>
@@ -38,6 +39,32 @@
         <ul id="recents" class="sessions"></ul>
       </div>
     </div>
+    <!-- machine detail (top procs, temp, uptime, load) -->
+    <div id="machine-detail" class="sheet" hidden>
+      <div class="sheet-panel" role="dialog" aria-label="Machine details">
+        <div class="sheet-head">
+          <span id="machine-detail-name">Machine</span>
+          <button id="machine-detail-close" class="btn" title="Close">✕</button>
+        </div>
+        <div id="machine-detail-body" class="machine-detail-body"></div>
+      </div>
+    </div>
+
+    <!-- broadcast a command to the whole fleet -->
+    <div id="broadcast" class="sheet" hidden>
+      <div class="sheet-panel" role="dialog" aria-label="Run on all PCs">
+        <div class="sheet-head">
+          <span>Run on all PCs</span>
+          <button id="broadcast-close" class="btn" title="Close">✕</button>
+        </div>
+        <div class="menu-label">Runs the command on this PC and every tailnet peer, and shows each one's output.</div>
+        <input id="broadcast-cmd" class="compose-input" type="text" placeholder="e.g. uptime" enterkeyhint="go"
+               autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" />
+        <button id="broadcast-run" class="btn btn-primary">Run on all</button>
+        <div id="broadcast-results" class="broadcast-results"></div>
+      </div>
+    </div>
+
     <p id="picker-status" class="status"></p>
     <footer class="app-foot">
       <a href="https://github.com/samoylenkodmitry/webmux" target="_blank" rel="noopener">webmux · GitHub ↗</a>

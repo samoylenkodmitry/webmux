@@ -72,8 +72,13 @@ html, body {
 }
 .machine-name { display: flex; align-items: center; gap: 6px; font-size: 13px; }
 .machine-name::before { content: "●"; color: #3fb950; font-size: 10px; }
-.machine-label { overflow: hidden; text-overflow: ellipsis; }
+.machine-label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .machine-stats { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.machine-spark { width: 100%; height: 18px; display: block; margin-top: 2px; opacity: 0.95; }
+.machine-info {
+  appearance: none; background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: 13px; padding: 0 2px; line-height: 1;
+}
 .machine:hover { border-color: var(--accent); }
 .machine.current { border-color: var(--accent); cursor: default; }
 .machine.current .machine-name { color: var(--accent); }
@@ -302,6 +307,29 @@ html, body {
 .copy-search-input:focus { border-color: var(--accent); }
 .copy-search-count { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 36px; text-align: center; }
 .copy-search .btn { min-width: 40px; padding: 8px 10px; }
+
+/* Machine detail sheet + broadcast results */
+.machine-detail-body { padding: 4px 6px; }
+.md-line { color: var(--fg); font-size: 14px; padding: 2px 0; }
+.md-sub { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; padding: 10px 0 4px; }
+.md-proc {
+  display: flex; justify-content: space-between; gap: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+  padding: 3px 0; border-bottom: 1px solid var(--border);
+}
+.md-proc span:last-child { color: var(--accent); font-variant-numeric: tabular-nums; }
+.broadcast-results { margin-top: 8px; max-height: 50dvh; overflow: auto; }
+.bc-result { margin-bottom: 8px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.bc-result.bad { border-color: #f85149; }
+.bc-host { padding: 6px 10px; background: var(--bar); font-weight: 600; font-size: 13px; }
+.bc-out {
+  margin: 0; padding: 8px 10px; max-height: 30dvh; overflow: auto;
+  white-space: pre-wrap; word-break: break-word;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+  -webkit-user-select: text; user-select: text;
+}
+#broadcast-cmd { width: 100%; }
+#broadcast-run { width: 100%; }
 
 /* Overlay sheets dropping from the top (session switcher + terminal menu) */
 .switcher, .sheet {
