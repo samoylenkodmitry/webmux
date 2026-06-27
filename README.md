@@ -1,3 +1,4 @@
+<img width="1318" height="760" alt="Screenshot 2026-06-27 at 09 43 05" src="https://github.com/user-attachments/assets/fc2777e6-c19d-4f8b-97a1-6469c37ec2c9" />
 <h1 align="center">webmux</h1>
 
 <p align="center"><b>Every terminal on every computer you own — in your pocket.</b></p>
