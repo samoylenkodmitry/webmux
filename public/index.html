@@ -82,14 +82,17 @@
       <span id="conn" class="conn"></span>
       <div class="bar-actions">
         <button id="copy" class="btn" title="Select / copy text">⧉</button>
-        <button id="paste" class="btn" title="Paste from clipboard">⎘</button>
-        <button id="compose-btn" class="btn" title="Compose &amp; send text (mobile-friendly)">✎</button>
-        <button id="snip-btn" class="btn" title="Quick replies">⚡</button>
         <button id="kbd" class="btn" title="Toggle keyboard">⌨</button>
         <button id="menu-btn" class="btn" title="Menu">⋯</button>
       </div>
     </header>
-    <div id="term" class="term"></div>
+    <div id="term" class="term">
+      <!-- Floating actions (above the bottom bar): quick replies + compose. -->
+      <div class="fabs">
+        <button id="snip-btn" class="fab" title="Quick replies">⚡</button>
+        <button id="compose-btn" class="fab" title="Compose &amp; send text (mobile-friendly)">✎</button>
+      </div>
+    </div>
 
     <!-- Compose bar: type into a normal field (T9 / suggestions work, no IME
          doubling), then Send to the terminal. Toggled with the ✎ button. -->

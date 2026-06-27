@@ -1318,7 +1318,7 @@ $('snip-edit-save').addEventListener('click', () => {
   closeSnipEdit();
 });
 
-$('paste').addEventListener('click', async () => {
+$('paste')?.addEventListener('click', async () => {
   try {
     const text = await navigator.clipboard.readText();
     if (text && await confirmLarge(text)) { ensureBottom(); sendBytes(text); }

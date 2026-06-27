@@ -1000,8 +1000,11 @@ const server = http.createServer(async (req, res) => {
     const name = url.searchParams.get('name') || '';
     if (!NAME_RE.test(name)) return sendJson(res, 400, { error: 'invalid session name' });
     try {
-      // -S -5000: up to 5000 lines of scrollback; -J joins wrapped lines for clean copy.
-      const out = await tmux(['capture-pane', '-t', `=${name}:`, '-p', '-J', '-S', '-5000']);
+      // -S -: the entire scrollback (history-limit caps it); -J joins wrapped
+      // lines for clean copy. NB: full-screen TUIs that repaint in place (e.g.
+      // Claude Code) keep their own scroll view and don't push history to the
+      // terminal scrollback, so only the current screen is available for those.
+      const out = await tmux(['capture-pane', '-t', `=${name}:`, '-p', '-J', '-S', '-']);
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-cache' });
       return res.end(out);
     } catch {
