@@ -442,6 +442,21 @@ function webmuxVersion() {
   return _versionPromise;
 }
 
+// The version the fleet will CONVERGE TO on update: the installer does
+// `git reset --hard origin/main`, so the target is the *remote* main HEAD — not this
+// coordinator's local version (which may be behind). Polling the coordinator's own
+// version as the target leaves every peer stuck "updating…" forever when the
+// coordinator isn't on HEAD. Falls back to local if the fetch fails.
+async function remoteTargetVersion() {
+  try {
+    await execFileP('git', ['-C', __dirname, 'fetch', '--quiet', 'origin', 'main'], { encoding: 'utf8', timeout: 15000 });
+    const { stdout } = await execFileP('git', ['-C', __dirname, 'rev-parse', '--short', 'origin/main'], { encoding: 'utf8' });
+    return stdout.trim();
+  } catch {
+    return webmuxVersion();
+  }
+}
+
 // --- machine stats (CPU / GPU / disk / RAM) for the picker's machine row ----
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function cpuTimes() {
@@ -1053,7 +1068,7 @@ const server = http.createServer(async (req, res) => {
         peers = await Promise.all(list.map((p) => updatePeer(p)));
       } catch { /* peer fan-out is best-effort */ }
     }
-    return sendJson(res, 200, { ok: true, version: await webmuxVersion(), peers });
+    return sendJson(res, 200, { ok: true, version: await remoteTargetVersion(), peers });
   }
   if (url.pathname === '/api/recents') {
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });

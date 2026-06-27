@@ -1621,7 +1621,17 @@ async function openUpdateProgress() {
     note.textContent = 'Could not start update: ' + (e.message || e);
     return;
   }
-  self.subEl.textContent = target ? 'version ' + target : '';
+  // Show THIS PC's real version; the coordinator doesn't self-update, so if it's
+  // behind the fleet target it needs its own update (the target is remote main HEAD).
+  try {
+    const h = await (await fetch('/api/health', { cache: 'no-store' })).json();
+    const selfVer = (h && h.version) || '';
+    if (selfVer && target && selfVer !== target) {
+      setRowState(self, 'updating', `on ${selfVer} → ${target}: update THIS PC separately (it stays up to coordinate)`);
+    } else {
+      self.subEl.textContent = 'version ' + (selfVer || target);
+    }
+  } catch { self.subEl.textContent = target ? 'version ' + target : ''; }
 
   for (const p of peers) {
     const m = { id: p.dns, name: p.name, dns: p.dns, ip: p.ip };
