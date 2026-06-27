@@ -23,6 +23,7 @@
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "node-pty": "^1.0.0",
+    "web-push": "^3.6.7",
     "ws": "^8.18.0"
   }
 }

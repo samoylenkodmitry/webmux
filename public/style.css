@@ -115,6 +115,7 @@ html, body {
 .session:active { border-color: var(--accent); }
 .session .meta { flex: 1; min-width: 0; }
 .session .name { font-weight: 600; font-size: 16px; }
+.session .act-dot { color: #d29922; font-size: 9px; margin-right: 5px; vertical-align: middle; }
 /* Command on its own line: full width, wraps to at most 2 lines instead of being
    trimmed against the path on a narrow screen. */
 .session .cmd {

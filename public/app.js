@@ -437,6 +437,19 @@ async function fetchSessions() {
   return sessions || [];
 }
 
+// "Seen" activity timestamps (server's session_activity, seconds) per session,
+// so the picker can flag sessions that produced output since you last viewed them.
+function loadSeen() { try { return JSON.parse(localStorage.getItem('ptw-seen')) || {}; } catch { return {}; } }
+function markSeen(name, activity) {
+  if (!name || !activity) return;
+  const m = loadSeen();
+  if (m[name] === activity) return;
+  m[name] = activity;
+  const keys = Object.keys(m);
+  if (keys.length > 200) delete m[keys[0]];
+  try { localStorage.setItem('ptw-seen', JSON.stringify(m)); } catch { /* quota */ }
+}
+
 function sessionItem(s, { current = false, onClick } = {}) {
   const li = document.createElement('li');
   li.className = 'session' + (current ? ' current' : '');
@@ -446,6 +459,14 @@ function sessionItem(s, { current = false, onClick } = {}) {
   const name = document.createElement('div');
   name.className = 'name';
   name.textContent = s.name;
+  // "New output since you last looked" dot (unattached sessions only).
+  if (!current && s.activity && s.activity > (loadSeen()[s.name] || 0) && !(s.attached > 0)) {
+    const dot = document.createElement('span');
+    dot.className = 'act-dot';
+    dot.title = 'new output since you last looked';
+    dot.textContent = '●';
+    name.prepend(dot);
+  }
   // Command on its own line (it can be a long full argv now, e.g. "sudo btop")
   // so it isn't squeezed/trimmed next to the path on a narrow phone screen.
   const cmd = document.createElement('div');
@@ -934,6 +955,7 @@ async function refreshTitle() {
     const res = await fetch('/api/session?name=' + encodeURIComponent(currentName), { cache: 'no-store' });
     if (!res.ok) return;
     const s = await res.json();
+    markSeen(currentName, s.activity); // viewing it ⇒ caught up on its output
     termSubEl.textContent = (s.command || '') + (s.path ? '  ·  ' + s.path : '');
     document.title = (s.command ? s.command + ' — ' : '') + (s.path || currentName);
   } catch { /* leave previous */ }
@@ -1301,7 +1323,53 @@ $('paste').addEventListener('click', async () => {
 // --- terminal menu --------------------------------------------------------
 
 const menuEl = $('menu');
-function openMenu() { $('font-val').textContent = String(fontSize); menuEl.hidden = false; }
+function openMenu() { $('font-val').textContent = String(fontSize); updateNotifyLabel(); menuEl.hidden = false; }
+
+// --- push notifications (activity alerts) ---------------------------------
+function urlB64ToUint8(b64) {
+  const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+function pushSupported() { return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window; }
+async function notifyState() {
+  if (!pushSupported()) return 'unsupported';
+  try { const reg = await navigator.serviceWorker.ready; return (await reg.pushManager.getSubscription()) ? 'on' : 'off'; }
+  catch { return 'off'; }
+}
+async function enableNotify() {
+  if (Notification.permission !== 'granted' && (await Notification.requestPermission()) !== 'granted') return false;
+  let keyRes;
+  try { keyRes = await (await fetch('/api/push/key')).json(); } catch { return false; }
+  if (!keyRes.enabled || !keyRes.key) return false;
+  const reg = await navigator.serviceWorker.ready;
+  const sub = (await reg.pushManager.getSubscription())
+    || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8(keyRes.key) }));
+  await fetch('/api/push/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub) });
+  return true;
+}
+async function disableNotify() {
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  if (!sub) return;
+  try { await fetch('/api/push/unsubscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint }) }); } catch { /* ignore */ }
+  try { await sub.unsubscribe(); } catch { /* ignore */ }
+}
+async function updateNotifyLabel() {
+  const st = await notifyState();
+  const el = $('menu-notify');
+  if (!el) return;
+  el.textContent = st === 'on' ? '🔔 Notifications: on' : (st === 'unsupported' ? '🔔 Notifications: n/a' : '🔔 Notifications: off');
+  el.classList.toggle('armed', st === 'on');
+}
+$('menu-notify').addEventListener('click', async () => {
+  const st = await notifyState();
+  if (st === 'unsupported') { $('menu-notify').textContent = '🔔 not supported here'; return; }
+  $('menu-notify').textContent = '🔔 …';
+  if (st === 'on') await disableNotify();
+  else { const ok = await enableNotify(); if (ok) { try { await fetch('/api/push/test', { method: 'POST' }); } catch { /* ignore */ } } }
+  updateNotifyLabel();
+});
 function closeMenu() { menuEl.hidden = true; }
 
 $('menu-btn').addEventListener('click', openMenu);

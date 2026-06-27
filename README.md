@@ -36,6 +36,7 @@ Rendered with [xterm.js](https://xtermjs.org/); the backend bridges a WebSocket 
 - **Quick replies:** a ⚡ toggle shows a row of one-tap chips (`y` / `continue` / `approve` / …, editable) that send common answers to coding agents without the keyboard.
 - **Scrollback search:** the copy view has a search box with match count and next/prev to find text across the captured history.
 - **One-tap fleet update:** a menu button updates **every other webmux box on your tailnet** to this PC's version — non-interactively, each machine keeping its own settings — with a live per-PC progress window. (This PC stays up as the coordinator/source; update it the normal way.)
+- **Activity alerts:** opt-in push notifications — when a session that was producing output goes quiet while no client is attached (your agent/build finished and is waiting), your phone buzzes; tap the notification to jump straight into that session. The picker also shows a "new output" dot on sessions that changed since you last looked. (Install the PWA and toggle 🔔 Notifications in the terminal menu; uses Web Push.)
 - **Per-terminal font size:** each session remembers its own zoom.
 
 ## Why (the workflow)
@@ -96,7 +97,7 @@ webmux has **no authentication** — anyone who can reach the port gets a shell 
 - **Linux & macOS** supported (open-on-PC uses Ghostty on Linux, Terminal.app/iTerm/Ghostty on macOS via your installer choice). **Windows:** run under WSL (Linux from there).
 - "Open on PC" is best-effort; with no display it falls back to a browser-only session.
 - Opening a peer's `…ts.net` URL from a desktop needs Tailscale MagicDNS working there; if it doesn't, the picker shows a one-line `/etc/hosts` workaround for that peer.
-- HTTP API: `/api/sessions`, `/api/session`, `/api/recents`, `/api/capture`, `/api/windows`, `/api/open`, `/api/kill`, `/api/update`, `/api/stats`, `/api/broadcast`, `/api/peer/sessions`, `/api/peer/health`, `/api/peer/stats`, `/api/tailnet`, `/api/health`; WebSocket at `/ws/session/<name>` and `/ws/new`. See [`server.js`](server.js).
+- HTTP API: `/api/sessions`, `/api/session`, `/api/recents`, `/api/capture`, `/api/windows`, `/api/open`, `/api/kill`, `/api/update`, `/api/stats`, `/api/broadcast`, `/api/push/*`, `/api/peer/sessions`, `/api/peer/health`, `/api/peer/stats`, `/api/tailnet`, `/api/health`; WebSocket at `/ws/session/<name>` and `/ws/new`. See [`server.js`](server.js).
 - The session list shows the **full foreground command** (so `sudo btop` reads as `sudo btop`, not just `sudo`), resolved from the pane's controlling-terminal foreground process group (Linux). New sessions open in `~`.
 - The **all-PCs update** reaches every webmux box on your tailnet: newer ones via `POST /api/update?scope=self`, and older ones (predating that endpoint) by driving their `/ws/new` shell to run the installer — the same shell access the UI already has. The install runs non-interactively (reusing each box's existing settings) and is detached with `nohup` so it survives the service restart it triggers (output goes to `/tmp/webmux-update.log` on each peer). The progress window polls each peer's `/api/health` version until it matches.
 

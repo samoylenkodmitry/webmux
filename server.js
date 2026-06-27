@@ -611,19 +611,20 @@ async function listSessions() {
     // Pane vars resolve against each session's active pane, so one call is enough.
     out = await tmux([
       'list-sessions', '-F',
-      `#{session_name}${FS}#{session_attached}${FS}#{session_windows}${FS}#{pane_current_command}${FS}#{pane_current_path}${FS}#{pane_pid}`,
+      `#{session_name}${FS}#{session_attached}${FS}#{session_windows}${FS}#{pane_current_command}${FS}#{pane_current_path}${FS}#{pane_pid}${FS}#{session_activity}`,
     ]);
   } catch {
     return []; // no server running -> no sessions
   }
   const rows = out.split('\n').filter(Boolean).map((line) => {
-    const [name, attached, windows, command, cwd, panePid] = line.split(FS);
+    const [name, attached, windows, command, cwd, panePid, activity] = line.split(FS);
     return {
       name,
       attached: Number(attached) || 0,
       windows: Number(windows) || 0,
       command: command || '',
       path: prettyPath(cwd || ''),
+      activity: Number(activity) || 0, // unix seconds of last activity (for "new" badges)
       panePid,
     };
   });
@@ -658,11 +659,12 @@ async function listWindows(name) {
   });
 }
 
-// One session's live command + directory (for the dynamic browser title).
+// One session's live command + directory (for the dynamic browser title). Also
+// returns session_activity so the client can mark this session "seen".
 async function sessionInfo(name) {
-  const out = await tmux(['display-message', '-p', '-t', `=${name}:`, `#{pane_current_command}${FS}#{pane_current_path}`]);
-  const [command, dir] = out.trim().split(FS);
-  return { name, command: command || '', dir: dir || '', path: prettyPath(dir || '') };
+  const out = await tmux(['display-message', '-p', '-t', `=${name}:`, `#{pane_current_command}${FS}#{pane_current_path}${FS}#{session_activity}`]);
+  const [command, dir, activity] = out.trim().split(FS);
+  return { name, command: command || '', dir: dir || '', path: prettyPath(dir || ''), activity: Number(activity) || 0 };
 }
 
 // --- recent directories (history of closed sessions) -----------------------
@@ -700,19 +702,77 @@ function recordRecent(dir, command) {
   saveRecents();
 }
 
+// --- Web Push (activity alerts) --------------------------------------------
+// Notify the phone when a session that was producing output goes quiet while no
+// client is attached — i.e. "your agent/build finished and is waiting." Best
+// effort: if web-push isn't installed, the endpoints just report disabled.
+const VAPID_FILE = path.join(STATE_DIR, 'vapid.json');
+const SUBS_FILE = path.join(STATE_DIR, 'push-subs.json');
+let webpush = null;
+let vapid = null;
+let pushSubs = [];
+async function initPush() {
+  try { webpush = (await import('web-push')).default; }
+  catch { return; } // dependency missing → push disabled, server still runs
+  try { vapid = JSON.parse(await readFile(VAPID_FILE, 'utf8')); } catch { vapid = null; }
+  if (!vapid || !vapid.publicKey || !vapid.privateKey) {
+    vapid = webpush.generateVAPIDKeys();
+    try { await mkdir(STATE_DIR, { recursive: true }); await writeFile(VAPID_FILE, JSON.stringify(vapid)); } catch { /* best effort */ }
+  }
+  webpush.setVapidDetails('mailto:webmux@localhost', vapid.publicKey, vapid.privateKey);
+  try { const d = JSON.parse(await readFile(SUBS_FILE, 'utf8')); if (Array.isArray(d)) pushSubs = d; } catch { /* none yet */ }
+}
+function savePushSubs() {
+  mkdir(STATE_DIR, { recursive: true }).then(() => writeFile(SUBS_FILE, JSON.stringify(pushSubs))).catch(() => {});
+}
+async function sendPush(payload) {
+  if (!webpush || !pushSubs.length) return;
+  const body = JSON.stringify(payload);
+  const dead = [];
+  await Promise.all(pushSubs.map(async (s) => {
+    try { await webpush.sendNotification(s, body); }
+    catch (e) { if (e && (e.statusCode === 404 || e.statusCode === 410)) dead.push(s.endpoint); }
+  }));
+  if (dead.length) { pushSubs = pushSubs.filter((s) => !dead.includes(s.endpoint)); savePushSubs(); }
+}
+
+// Per-session activity state machine: notify once when a session goes idle for
+// IDLE_NOTIFY_MS after having produced output, while unattached.
+const IDLE_NOTIFY_MS = 12000;
+const activityState = new Map(); // name -> { activity, changedAt, notified }
+function checkActivity(name, activity, attached, nowMs) {
+  let st = activityState.get(name);
+  if (!st) { activityState.set(name, { activity, changedAt: nowMs, notified: true }); return; } // first sight: don't alert
+  if (attached > 0) st.notified = true; // you're watching it; consider it acknowledged
+  if (activity > st.activity) {           // new output → it's busy again
+    st.activity = activity; st.changedAt = nowMs;
+    if (attached === 0) st.notified = false;
+    return;
+  }
+  if (!st.notified && attached === 0 && nowMs - st.changedAt >= IDLE_NOTIFY_MS) {
+    st.notified = true;
+    sendPush({ title: 'webmux', body: `“${name}” is idle — your turn`, tag: `idle-${name}`, name });
+  }
+}
+
 async function sampleSessions() {
   let out = '';
   try {
-    out = await tmux(['list-sessions', '-F', `#{session_name}${FS}#{pane_current_path}${FS}#{pane_current_command}`]);
+    out = await tmux(['list-sessions', '-F', `#{session_name}${FS}#{pane_current_path}${FS}#{pane_current_command}${FS}#{session_activity}${FS}#{session_attached}`]);
   } catch { /* no server -> every tracked session has closed */ }
   const current = new Map();
+  const nowMs = Date.now();
+  const live = new Set();
   for (const line of out.split('\n').filter(Boolean)) {
-    const [name, dir, command] = line.split(FS);
+    const [name, dir, command, activity, attached] = line.split(FS);
     current.set(name, { dir, command });
+    live.add(name);
+    checkActivity(name, Number(activity) || 0, Number(attached) || 0, nowMs);
   }
   for (const [name, info] of seen) {
     if (!current.has(name)) recordRecent(info.dir, info.command);
   }
+  for (const name of activityState.keys()) { if (!live.has(name)) activityState.delete(name); } // prune closed
   seen = current;
 }
 
@@ -849,6 +909,30 @@ const server = http.createServer(async (req, res) => {
       } catch { /* best effort */ }
     }
     return sendJson(res, 200, { results: [selfResult, ...peerResults] });
+  }
+  if (url.pathname === '/api/push/key') {
+    if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+    return sendJson(res, 200, { enabled: Boolean(webpush && vapid), key: vapid ? vapid.publicKey : '' });
+  }
+  if (url.pathname === '/api/push/subscribe') {
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+    const sub = await readBody(req);
+    if (!sub || !sub.endpoint) return sendJson(res, 400, { error: 'invalid subscription' });
+    if (!pushSubs.find((s) => s.endpoint === sub.endpoint)) { pushSubs.push(sub); savePushSubs(); }
+    return sendJson(res, 200, { ok: true });
+  }
+  if (url.pathname === '/api/push/unsubscribe') {
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+    const b = await readBody(req);
+    const before = pushSubs.length;
+    pushSubs = pushSubs.filter((s) => s.endpoint !== (b && b.endpoint));
+    if (pushSubs.length !== before) savePushSubs();
+    return sendJson(res, 200, { ok: true });
+  }
+  if (url.pathname === '/api/push/test') {
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+    await sendPush({ title: 'webmux', body: 'Notifications are on ✓', tag: 'webmux-test' });
+    return sendJson(res, 200, { ok: true, subs: pushSubs.length });
   }
   if (url.pathname === '/api/update') {
     if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
@@ -1095,6 +1179,7 @@ server.listen(PORT, HOST, () => {
 
 // Track recent directories: seed from current sessions, then sample so that a
 // session disappearing records its last directory into the history.
+await initPush();
 await loadRecents();
 await sampleSessions();
 const sampler = setInterval(() => { sampleSessions().catch(() => {}); }, 5000);
