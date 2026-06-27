@@ -65,5 +65,44 @@ fi
 echo "BOOT: install current Claude Code"
 npm install -g @anthropic-ai/claude-code || echo "BOOT: claude install failed (continuing without it)"
 
+echo "BOOT: install phone-control CLI + Claude guide"
+install -d /usr/local/bin
+cat > /usr/local/bin/phone <<'PHONE'
+#!/bin/bash
+# Drive the Android phone this Claude runs on, via the WebMux Host control API.
+API="http://127.0.0.1:8084"; c="$1"; shift 2>/dev/null || true
+case "$c" in
+  screenshot) o="${1:-/tmp/screen.png}"; curl -fsS -o "$o" "$API/screenshot" && echo "saved $o" ;;
+  ui)     curl -fsS "$API/ui"; echo ;;
+  tap)    curl -fsS -X POST "$API/tap?x=$1&y=$2"; echo ;;
+  swipe)  curl -fsS -X POST "$API/swipe?x1=$1&y1=$2&x2=$3&y2=$4&ms=${5:-300}"; echo ;;
+  type)   curl -fsS -X POST "$API/text" --data-binary "${1:-}"; echo ;;
+  key)    curl -fsS -X POST "$API/key?name=$1"; echo ;;
+  launch) curl -fsS -X POST "$API/launch?pkg=$1"; echo ;;
+  apps)   curl -fsS "$API/apps"; echo ;;
+  health) curl -fsS "$API/health"; echo ;;
+  *) echo "usage: phone {screenshot [file]|ui|tap X Y|swipe X1 Y1 X2 Y2 [ms]|type TEXT|key BACK|HOME|RECENTS|NOTIFICATIONS|launch PKG|apps|health}" ;;
+esac
+PHONE
+chmod +x /usr/local/bin/phone
+cat > /root/CLAUDE.md <<'GUIDE'
+# You are running on an Android phone
+
+You're in a Debian (proot) box inside the WebMux Host app, but you CAN control the
+phone with the `phone` command (it drives the app's accessibility service):
+
+- `phone screenshot /tmp/s.png` then read the image to see the screen
+- `phone ui` — JSON of on-screen elements: text, [left,top,right,bottom] bounds, tap/edit flags
+- `phone tap X Y` — tap a point (use the center of an element's bounds)
+- `phone swipe X1 Y1 X2 Y2 [ms]` — swipe / scroll
+- `phone type "text"` — type into the focused field
+- `phone key BACK|HOME|RECENTS|NOTIFICATIONS` — global buttons
+- `phone launch <package>` — open an app;  `phone apps` lists installed apps + packages
+
+Loop: `phone ui` (or a screenshot) to see what's on screen → tap/type → re-check.
+If `phone health` shows accessibility:false, the user must enable "WebMux Host" in
+Android Settings → Accessibility.
+GUIDE
+
 echo "BOOT: done"
 touch /opt/.webmux-bootstrapped

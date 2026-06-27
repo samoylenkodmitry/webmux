@@ -49,12 +49,20 @@ class MainActivity : AppCompatActivity() {
             text = "Allow background (battery)"
             setOnClickListener { requestIgnoreBattery() }
         }
+        val phoneControl = Button(this).apply {
+            text = "Enable phone control (Accessibility)"
+            setOnClickListener {
+                startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                status.text = "In Accessibility settings, enable \"WebMux Host\" so Claude can drive the phone."
+            }
+        }
 
         val sv = ScrollView(this)
         root.addView(title)
         root.addView(subtitle)
         root.addView(start)
         root.addView(battery)
+        root.addView(phoneControl)
         root.addView(status)
         sv.addView(root)
         setContentView(sv)

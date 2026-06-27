@@ -23,6 +23,7 @@ class HostService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private val working = AtomicBoolean(false)
     private lateinit var userland: Userland
+    private var control: ControlServer? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -30,6 +31,13 @@ class HostService : Service() {
         super.onCreate()
         userland = Userland(this)
         acquireWakeLock()
+        // Loopback phone-control API for the on-device Claude (127.0.0.1:8084).
+        runCatching {
+            control = ControlServer(applicationContext).apply {
+                start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            }
+            Log.i(TAG, "control server on 127.0.0.1:8084")
+        }.onFailure { Log.e(TAG, "control server failed", it) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -137,6 +145,7 @@ class HostService : Service() {
     }
 
     override fun onDestroy() {
+        runCatching { control?.stop() }
         wakeLock?.let { if (it.isHeld) it.release() }
         super.onDestroy()
     }
