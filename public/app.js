@@ -563,37 +563,68 @@ function ensureTerm() {
   applySnippetsVisibility();
 }
 
-// The scrollback lives in tmux, not in xterm. tmux `mouse on` means a real
-// mouse wheel scrolls it (via copy-mode); on a phone there's no wheel, so we
-// translate a finger drag into the same SGR wheel sequences and write them to
-// tmux. A plain tap is left untouched so it still focuses + opens the keyboard.
-const WHEEL_PX = 36; // finger pixels per wheel tick
+// The scrollback lives in tmux, not in xterm. tmux `mouse on` means a real mouse
+// wheel scrolls it (via copy-mode); on a phone there's no wheel, so we translate
+// a finger drag — and a flick's inertia — into SGR wheel sequences for tmux. A
+// plain tap is left untouched so it still focuses + opens the keyboard.
+//
+// One wheel ≈ one terminal line of finger travel (so content roughly tracks the
+// finger); momentum keeps it gliding after a flick, with friction. The step is
+// derived from the rendered cell height so it adapts to the current font size.
+function cellHeightPx() {
+  if (!term || !term.rows) return 18;
+  const h = termContainer.clientHeight / term.rows;
+  return (Number.isFinite(h) && h > 4) ? h : 18;
+}
 function setupTouchScroll() {
-  let startY = 0, lastY = 0, accum = 0, scrolling = false;
+  let startY = 0, lastY = 0, lastT = 0, accum = 0, vel = 0, step = 18, scrolling = false, momentum = 0;
+  const stopMomentum = () => { if (momentum) { cancelAnimationFrame(momentum); momentum = 0; } };
+  // Accumulate finger pixels; emit whole wheel ticks as they cross the step.
+  const feed = (dyPx) => {
+    accum += dyPx;
+    const ticks = Math.trunc(accum / step);
+    if (ticks !== 0) { wheelScroll(ticks); accum -= ticks * step; }
+  };
+
   termContainer.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1) return;
+    stopMomentum();
     startY = lastY = e.touches[0].clientY;
-    accum = 0;
-    scrolling = false;
+    lastT = performance.now();
+    accum = 0; vel = 0; scrolling = false;
+    step = cellHeightPx();
   }, { capture: true, passive: true });
 
   termContainer.addEventListener('touchmove', (e) => {
     if (e.touches.length !== 1) return;
-    const y = e.touches[0].clientY;
-    if (!scrolling && Math.abs(y - startY) > 8) scrolling = true;
-    if (!scrolling) return;
+    const y = e.touches[0].clientY, t = performance.now();
+    if (!scrolling) {
+      if (Math.abs(y - startY) <= 8) { lastY = y; lastT = t; return; }
+      scrolling = true; lastY = y; lastT = t; // start fresh so the first delta is small
+    }
     e.preventDefault();
     e.stopPropagation(); // keep it away from xterm's own mouse forwarding
-    accum += y - lastY;
-    lastY = y;
-    const ticks = Math.trunc(accum / WHEEL_PX); // drag down (>0) => scroll to older
-    if (ticks !== 0) { wheelScroll(ticks); accum -= ticks * WHEEL_PX; }
+    const dy = y - lastY, dt = Math.max(1, t - lastT);
+    vel = dy / dt; // px per ms (signed; +down => scroll to older)
+    feed(dy);
+    lastY = y; lastT = t;
   }, { capture: true, passive: false });
 
-  termContainer.addEventListener('touchend', (e) => {
+  const onEnd = (e) => {
     if (scrolling) e.stopPropagation(); // suppress the synthetic tap after a scroll
     scrolling = false;
-  }, { capture: true });
+    let v = Math.max(-3, Math.min(3, vel)) * 16; // px/frame, capped
+    if (Math.abs(v) < 4) return;                 // not a flick → no inertia
+    const glide = () => {
+      v *= 0.94;
+      if (Math.abs(v) < 1) { momentum = 0; return; }
+      feed(v);
+      momentum = requestAnimationFrame(glide);
+    };
+    momentum = requestAnimationFrame(glide);
+  };
+  termContainer.addEventListener('touchend', onEnd, { capture: true });
+  termContainer.addEventListener('touchcancel', () => { scrolling = false; stopMomentum(); }, { capture: true });
 }
 
 function sendWheel(up, ticks) {
