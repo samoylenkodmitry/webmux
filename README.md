@@ -33,6 +33,8 @@ Rendered with [xterm.js](https://xtermjs.org/); the backend bridges a WebSocket 
 - **Live title:** the bar (and tab) shows the session's current command + directory.
 - **Multiple machines:** optionally discovers other webmux instances on your [Tailscale](https://tailscale.com) tailnet and shows them as a row of cards — each with **live CPU / GPU / RAM and free disk** — that you can switch between. The session switcher also lists **every machine's sessions, grouped by box** (each peer streams in as it answers, so your own appear instantly), with a per-machine **＋ New** button.
 - **Compose bar:** a ✎ toggle opens a plain text field to type into and **Send** to the terminal — mobile keyboards' predictive text / T9 work there without the character-doubling that direct in-terminal typing can cause. Plus **Undo** (erase exactly what you last typed) and **Clr Ln** (^U) soft-keys.
+- **Quick replies:** a ⚡ toggle shows a row of one-tap chips (`y` / `continue` / `approve` / …, editable) that send common answers to coding agents without the keyboard.
+- **Scrollback search:** the copy view has a search box with match count and next/prev to find text across the captured history.
 - **One-tap fleet update:** a menu button updates **every other webmux box on your tailnet** to this PC's version — non-interactively, each machine keeping its own settings — with a live per-PC progress window. (This PC stays up as the coordinator/source; update it the normal way.)
 - **Per-terminal font size:** each session remembers its own zoom.
 

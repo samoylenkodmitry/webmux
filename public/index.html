@@ -57,6 +57,7 @@
         <button id="copy" class="btn" title="Select / copy text">⧉</button>
         <button id="paste" class="btn" title="Paste from clipboard">⎘</button>
         <button id="compose-btn" class="btn" title="Compose &amp; send text (mobile-friendly)">✎</button>
+        <button id="snip-btn" class="btn" title="Quick replies">⚡</button>
         <button id="kbd" class="btn" title="Toggle keyboard">⌨</button>
         <button id="menu-btn" class="btn" title="Menu">⋯</button>
       </div>
@@ -72,6 +73,9 @@
       <button id="compose-send" class="btn" title="Send text (no Enter)">Send</button>
       <button id="compose-go" class="btn btn-primary" title="Send text + Enter">⏎</button>
     </div>
+
+    <!-- Quick-reply chips: tap sends the text + Enter. Toggled with ⚡. -->
+    <div id="snippets" class="snippets" hidden></div>
 
     <div id="keys" class="keys"></div>
 
@@ -101,6 +105,8 @@
         </div>
         <button id="menu-windows" class="btn">▦ Windows</button>
         <button id="menu-open-pc" class="btn">🖥 Open on PC</button>
+        <button id="menu-search" class="btn">🔎 Search scrollback</button>
+        <button id="menu-snippets" class="btn">💬 Quick replies…</button>
         <button id="menu-bottom" class="btn">↓ Scroll to bottom</button>
         <button id="menu-reconnect" class="btn">↻ Reconnect</button>
         <button id="menu-update" class="btn">⬆ Update webmux (all PCs)</button>
@@ -132,6 +138,20 @@
       </div>
     </div>
 
+    <!-- quick-reply editor -->
+    <div id="snip-edit" class="sheet" hidden>
+      <div class="sheet-panel" role="dialog" aria-label="Quick replies">
+        <div class="sheet-head">
+          <span>Quick replies</span>
+          <button id="snip-edit-close" class="btn" title="Close">✕</button>
+        </div>
+        <div class="menu-label">One reply per line. Tapping a chip sends it + Enter.</div>
+        <textarea id="snip-edit-text" class="compose-input" rows="7"
+                  autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+        <button id="snip-edit-save" class="btn btn-primary">Save</button>
+      </div>
+    </div>
+
     <!-- reliable in-app confirm dialog (window.confirm is flaky in PWAs) -->
     <div id="confirm" class="sheet" hidden>
       <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
@@ -151,6 +171,13 @@
         <span>Long-press to select, or</span>
         <button id="copy-all" class="btn btn-primary">Copy all</button>
         <button id="copy-close" class="btn">Done</button>
+      </div>
+      <div class="copy-search">
+        <input id="copy-search-input" class="copy-search-input" type="search" placeholder="Search scrollback…"
+               enterkeyhint="search" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" />
+        <span id="copy-search-count" class="copy-search-count"></span>
+        <button id="copy-search-prev" class="btn" title="Previous match">↑</button>
+        <button id="copy-search-next" class="btn" title="Next match">↓</button>
       </div>
       <textarea id="copy-text" class="copy-text" readonly inputmode="none" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
     </div>

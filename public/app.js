@@ -26,6 +26,11 @@ const windowsList = $('windows-list');
 const confirmEl = $('confirm');
 const composeEl = $('compose');
 const composeInput = $('compose-input');
+const snippetsEl = $('snippets');
+const snipEditEl = $('snip-edit');
+const snipEditText = $('snip-edit-text');
+const copySearchInput = $('copy-search-input');
+const copySearchCount = $('copy-search-count');
 
 // --- terminal session state ----------------------------------------------
 let term = null;
@@ -410,6 +415,8 @@ function ensureTerm() {
   renderKeys();
   setupKeyBar();
   setupTouchScroll();
+  renderSnippets();
+  applySnippetsVisibility();
 }
 
 // The scrollback lives in tmux, not in xterm. tmux `mouse on` means a real
@@ -784,6 +791,7 @@ function backToPicker() {
   closeMenu();
   closeWindows();
   closeCompose();
+  closeSnipEdit();
   closeUpdateProgress();
   resolveConfirm(false);
   copyViewEl.hidden = true;
@@ -840,10 +848,11 @@ function localBufferText() {
   return lines.join('\n');
 }
 
-async function openCopyView() {
+async function openCopyView(opts = {}) {
   if (!term) return;
   copyTextEl.value = 'Loading history…';
   copyViewEl.hidden = false;
+  resetSearch();
   let text = '';
   if (currentName) {
     try {
@@ -853,15 +862,56 @@ async function openCopyView() {
   }
   if (!text) text = localBufferText(); // new/unnamed session or capture failed
   copyTextEl.value = text.replace(/\s+$/, '') + '\n';
-  requestAnimationFrame(() => { copyTextEl.scrollTop = copyTextEl.scrollHeight; });
+  if (opts.search) requestAnimationFrame(() => copySearchInput.focus());
+  else requestAnimationFrame(() => { copyTextEl.scrollTop = copyTextEl.scrollHeight; });
 }
 function closeCopyView() {
   copyViewEl.hidden = true;
   if (term) term.focus();
 }
 
-$('copy').addEventListener('click', openCopyView);
+// Scrollback search over the captured buffer: find all matches, jump between them
+// by selecting + scrolling the textarea to each.
+let searchMatches = [], searchIdx = -1;
+function resetSearch() { copySearchInput.value = ''; searchMatches = []; searchIdx = -1; copySearchCount.textContent = ''; }
+function runSearch() {
+  const q = copySearchInput.value;
+  const text = copyTextEl.value;
+  searchMatches = [];
+  if (q) {
+    const lc = text.toLowerCase(), ql = q.toLowerCase();
+    for (let i = lc.indexOf(ql); i !== -1; i = lc.indexOf(ql, i + ql.length)) searchMatches.push(i);
+  }
+  searchIdx = searchMatches.length ? 0 : -1;
+  if (searchIdx >= 0) gotoMatch(0); else updateSearchCount();
+}
+function updateSearchCount() {
+  copySearchCount.textContent = searchMatches.length
+    ? `${searchIdx + 1}/${searchMatches.length}`
+    : (copySearchInput.value ? '0' : '');
+}
+function gotoMatch(idx) {
+  if (idx < 0 || idx >= searchMatches.length) return;
+  searchIdx = idx;
+  const start = searchMatches[idx], end = start + copySearchInput.value.length;
+  const line = (copyTextEl.value.slice(0, start).match(/\n/g) || []).length;
+  const lh = parseFloat(getComputedStyle(copyTextEl).lineHeight) || 18;
+  copyTextEl.scrollTop = Math.max(0, line * lh - copyTextEl.clientHeight / 3);
+  try { copyTextEl.focus({ preventScroll: true }); copyTextEl.setSelectionRange(start, end); } catch { /* ignore */ }
+  updateSearchCount();
+}
+function stepSearch(d) {
+  if (!searchMatches.length) return;
+  gotoMatch((searchIdx + d + searchMatches.length) % searchMatches.length);
+}
+copySearchInput.addEventListener('input', runSearch);
+copySearchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); stepSearch(e.shiftKey ? -1 : 1); } });
+$('copy-search-prev').addEventListener('click', () => stepSearch(-1));
+$('copy-search-next').addEventListener('click', () => stepSearch(1));
+
+$('copy').addEventListener('click', () => openCopyView());
 $('copy-close').addEventListener('click', closeCopyView);
+$('menu-search').addEventListener('click', () => { closeMenu(); openCopyView({ search: true }); });
 $('copy-all').addEventListener('click', async (e) => {
   const btn = e.currentTarget;
   try {
@@ -1059,6 +1109,66 @@ composeInput.addEventListener('input', autosizeCompose);
 composeInput.addEventListener('keydown', (e) => {
   // Enter submits (send + Enter); Shift+Enter inserts a newline for multi-line.
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendCompose(true); }
+});
+
+// --- quick-reply snippets -------------------------------------------------
+// A toggleable row of chips that each send their text + Enter — for answering
+// coding agents (y / continue / approve …) without the keyboard. Editable list,
+// persisted in localStorage.
+const SNIP_KEY = 'ptw-snippets';
+const SNIP_DEFAULT = ['y', 'n', 'continue', 'approve', '/clear', 'exit'];
+function loadSnippets() {
+  try { const a = JSON.parse(localStorage.getItem(SNIP_KEY)); return Array.isArray(a) ? a : SNIP_DEFAULT; }
+  catch { return SNIP_DEFAULT; }
+}
+function sendSnippet(text) {
+  ensureBottom();
+  sendBytes(text + '\r');
+  lastInput = '';
+  if (navigator.vibrate) { try { navigator.vibrate(8); } catch { /* unsupported */ } }
+  focusActiveInput();
+}
+function renderSnippets() {
+  snippetsEl.innerHTML = '';
+  for (const sn of loadSnippets()) {
+    const b = document.createElement('button');
+    b.className = 'snip';
+    b.textContent = sn;
+    b.addEventListener('pointerdown', (e) => e.preventDefault()); // keep focus/keyboard
+    b.addEventListener('click', () => sendSnippet(sn));
+    snippetsEl.append(b);
+  }
+  const edit = document.createElement('button');
+  edit.className = 'snip snip-config';
+  edit.textContent = '✎';
+  edit.title = 'Edit quick replies';
+  edit.addEventListener('pointerdown', (e) => e.preventDefault());
+  edit.addEventListener('click', openSnipEdit);
+  snippetsEl.append(edit);
+}
+let snippetsOpen = false;
+try { snippetsOpen = JSON.parse(localStorage.getItem('ptw-snippets-open') || 'false'); } catch { /* default off */ }
+function applySnippetsVisibility() {
+  snippetsEl.hidden = !snippetsOpen;
+  $('snip-btn').classList.toggle('armed', snippetsOpen);
+  scheduleFit();
+}
+function toggleSnippets() {
+  snippetsOpen = !snippetsOpen;
+  try { localStorage.setItem('ptw-snippets-open', JSON.stringify(snippetsOpen)); } catch { /* ignore */ }
+  applySnippetsVisibility();
+}
+function openSnipEdit() { snipEditText.value = loadSnippets().join('\n'); snipEditEl.hidden = false; }
+function closeSnipEdit() { snipEditEl.hidden = true; }
+$('snip-btn').addEventListener('click', toggleSnippets);
+$('menu-snippets').addEventListener('click', () => { closeMenu(); if (!snippetsOpen) toggleSnippets(); openSnipEdit(); });
+$('snip-edit-close').addEventListener('click', closeSnipEdit);
+snipEditEl.addEventListener('click', (e) => { if (e.target === snipEditEl) closeSnipEdit(); });
+$('snip-edit-save').addEventListener('click', () => {
+  const arr = snipEditText.value.split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 40);
+  try { localStorage.setItem(SNIP_KEY, JSON.stringify(arr)); } catch { /* ignore */ }
+  renderSnippets();
+  closeSnipEdit();
 });
 
 $('paste').addEventListener('click', async () => {
