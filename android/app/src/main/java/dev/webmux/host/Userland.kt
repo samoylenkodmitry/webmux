@@ -139,6 +139,9 @@ class Userland(private val ctx: Context) {
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "LANG=C.UTF-8",
             "DEBIAN_FRONTEND=noninteractive",
+            // proot fakes root (-0); Claude Code blocks --dangerously-skip-permissions
+            // as root unless it believes it's sandboxed. The proot box is exactly that.
+            "IS_SANDBOX=1",
         )
         a.addAll(guestEnv)
         a.addAll(guestCmd)
@@ -211,7 +214,7 @@ class Userland(private val ctx: Context) {
                 // claude's first-run onboarding wants an attached client, so run it but
                 // fall back to a shell (in /root) if it exits — the session always persists.
                 "tmux has-session -t claude 2>/dev/null || " +
-                    "tmux new-session -d -s claude -x 110 -y 40 'cd /root; claude; exec bash -l'; " +
+                    "tmux new-session -d -s claude -x 110 -y 40 'cd /root; claude --dangerously-skip-permissions; exec bash -l'; " +
                     "tmux has-session -t shell 2>/dev/null || tmux new-session -d -s shell -c /root; " +
                     "cd /opt/webmux && exec node server.js"
             ),

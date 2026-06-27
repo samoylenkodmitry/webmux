@@ -101,8 +101,70 @@ phone with the `phone` command (it drives the app's accessibility service):
 
 Loop: `phone ui` (or a screenshot) to see what's on screen → tap/type → re-check.
 If `phone health` shows accessibility:false, the user must enable "WebMux Host" in
-Android Settings → Accessibility.
+Android Settings → Accessibility. You also have these as native MCP tools (phone:*).
 GUIDE
+
+echo "BOOT: install phone MCP server for Claude"
+install -d /usr/local/lib
+cat > /usr/local/lib/phone-mcp.js <<'MCP'
+#!/usr/bin/env node
+// Minimal stdio MCP server exposing Android phone control to Claude (via the
+// WebMux Host loopback API on 127.0.0.1:8084).
+const http = require('http');
+const API = 'http://127.0.0.1:8084';
+function call(path, method = 'GET', body) {
+  return new Promise((res) => {
+    const u = new URL(API + path);
+    const r = http.request({ host: u.hostname, port: u.port, path: u.pathname + u.search, method }, (s) => {
+      const ch = []; s.on('data', (c) => ch.push(c));
+      s.on('end', () => res({ status: s.statusCode, buf: Buffer.concat(ch) }));
+    });
+    r.on('error', () => res({ status: 0, buf: Buffer.alloc(0) }));
+    if (body) r.write(body); r.end();
+  });
+}
+const T = (t) => ({ content: [{ type: 'text', text: String(t) }] });
+const TOOLS = [
+  { name: 'screenshot', description: 'Screenshot the phone screen (returns an image). Android 11+.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'ui', description: 'On-screen elements as JSON: text, [left,top,right,bottom] bounds, tap/edit flags.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'tap', description: 'Tap a point on screen.', inputSchema: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } }, required: ['x', 'y'] } },
+  { name: 'swipe', description: 'Swipe/scroll between two points.', inputSchema: { type: 'object', properties: { x1: { type: 'number' }, y1: { type: 'number' }, x2: { type: 'number' }, y2: { type: 'number' }, ms: { type: 'number' } }, required: ['x1', 'y1', 'x2', 'y2'] } },
+  { name: 'type', description: 'Type text into the focused field.', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
+  { name: 'key', description: 'Press a global button: BACK, HOME, RECENTS, NOTIFICATIONS.', inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
+  { name: 'launch', description: 'Launch an app by package name.', inputSchema: { type: 'object', properties: { pkg: { type: 'string' } }, required: ['pkg'] } },
+  { name: 'apps', description: 'List installed apps + package names.', inputSchema: { type: 'object', properties: {} } },
+];
+async function run(name, a = {}) {
+  if (name === 'screenshot') { const r = await call('/screenshot'); return r.status === 200 ? { content: [{ type: 'image', data: r.buf.toString('base64'), mimeType: 'image/png' }] } : T('screenshot failed (needs Android 11+ and accessibility enabled)'); }
+  if (name === 'ui') return T((await call('/ui')).buf.toString());
+  if (name === 'apps') return T((await call('/apps')).buf.toString());
+  if (name === 'tap') { await call(`/tap?x=${a.x}&y=${a.y}`, 'POST'); return T(`tapped ${a.x},${a.y}`); }
+  if (name === 'swipe') { await call(`/swipe?x1=${a.x1}&y1=${a.y1}&x2=${a.x2}&y2=${a.y2}&ms=${a.ms || 300}`, 'POST'); return T('swiped'); }
+  if (name === 'type') { await call('/text', 'POST', String(a.text || '')); return T('typed'); }
+  if (name === 'key') { await call(`/key?name=${encodeURIComponent(a.name)}`, 'POST'); return T(`key ${a.name}`); }
+  if (name === 'launch') { await call(`/launch?pkg=${encodeURIComponent(a.pkg)}`, 'POST'); return T(`launched ${a.pkg}`); }
+  return T('unknown tool ' + name);
+}
+function send(o) { process.stdout.write(JSON.stringify(o) + '\n'); }
+let buf = '';
+process.stdin.on('data', async (d) => {
+  buf += d; let i;
+  while ((i = buf.indexOf('\n')) >= 0) {
+    const line = buf.slice(0, i); buf = buf.slice(i + 1); if (!line.trim()) continue;
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    const { id, method, params } = m;
+    if (method === 'initialize') send({ jsonrpc: '2.0', id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'phone', version: '1.0.0' } } });
+    else if (method === 'tools/list') send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
+    else if (method === 'tools/call') { try { send({ jsonrpc: '2.0', id, result: await run(params.name, params.arguments) }); } catch (e) { send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'error: ' + e.message }], isError: true } }); } }
+    else if (id !== undefined) send({ jsonrpc: '2.0', id, result: {} });
+  }
+});
+MCP
+chmod +x /usr/local/lib/phone-mcp.js
+
+echo "BOOT: register phone MCP with Claude (user scope)"
+claude mcp remove phone -s user 2>/dev/null || true
+claude mcp add phone -s user -- node /usr/local/lib/phone-mcp.js 2>&1 | tail -1 || echo "BOOT: mcp add failed (phone CLI still works)"
 
 echo "BOOT: done"
 touch /opt/.webmux-bootstrapped
