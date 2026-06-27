@@ -1302,6 +1302,16 @@ await sampleSessions();
 const sampler = setInterval(() => { sampleSessions().catch(() => {}); }, 5000);
 sampler.unref();
 
+// Background discovery heartbeat: periodically probe peers even when no one is viewing
+// this node's picker. Each probe carries our X-Webmux-Self tag, so peers that can't run
+// `tailscale status` (a phone's proot) learn us from it. Without this, a phone only sees
+// peers whose pickers happen to be open. (No-op if Tailscale discovery is disabled.)
+if (TAILSCALE_ENABLED) {
+  const discoveryBeat = setInterval(() => { tailscalePeers().catch(() => {}); }, 25_000);
+  discoveryBeat.unref();
+  tailscalePeers().catch(() => {});
+}
+
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
     server.close(() => process.exit(0));
