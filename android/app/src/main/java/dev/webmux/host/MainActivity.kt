@@ -56,6 +56,15 @@ class MainActivity : AppCompatActivity() {
                 status.text = "In Accessibility settings, enable \"WebMux Host\" so Claude can drive the phone."
             }
         }
+        val repair = Button(this).apply {
+            text = "Repair / apply updates (keeps Claude login)"
+            setOnClickListener {
+                val svc = Intent(this@MainActivity, HostService::class.java)
+                    .putExtra(HostService.EXTRA_REBOOTSTRAP, true)
+                ContextCompat.startForegroundService(this@MainActivity, svc)
+                status.text = "Re-running setup (updates webmux + MCP; keeps your rootfs + Claude login)…"
+            }
+        }
 
         val sv = ScrollView(this)
         root.addView(title)
@@ -63,6 +72,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(start)
         root.addView(battery)
         root.addView(phoneControl)
+        root.addView(repair)
         root.addView(status)
         sv.addView(root)
         setContentView(sv)
