@@ -1239,25 +1239,55 @@ $('kbd').addEventListener('click', () => {
   else focusActiveInput();
 });
 
-// --- compose bar: reliable mobile text entry ------------------------------
-// Typing directly into xterm routes through the browser IME, and some mobile
-// keyboards (T9 / predictive text) double characters that way. The compose bar is
-// a plain textarea where that never happens: type (suggestions work), optionally
-// edit, then Send pushes the text to the PTY in one shot.
+// --- compose bar: reliable mobile text entry with history + undo ----------
+// A plain textarea (no IME doubling). It auto-grows, keeps a persisted, navigable
+// history of inputs, continuously saves the live draft as the "last" item (so a
+// reload never loses it), starts a fresh history item on each Send, and has an
+// Undo for accidental big pastes.
 let composeOpen = false;
+const COMPOSE_HIST_KEY = 'ptw-compose-history';
+const COMPOSE_DRAFT_KEY = 'ptw-compose-draft';
+const COMPOSE_HISTORY_MAX = 100;
+const COMPOSE_UNDO_THRESHOLD = 24; // a one-event length jump this big counts as a paste
+function loadComposeEntries() {
+  try { const a = JSON.parse(localStorage.getItem(COMPOSE_HIST_KEY)); return Array.isArray(a) ? a.filter((s) => typeof s === 'string') : []; }
+  catch { return []; }
+}
+let composeEntries = loadComposeEntries();
+let composeDraft = '';
+try { composeDraft = localStorage.getItem(COMPOSE_DRAFT_KEY) || ''; } catch { /* none */ }
+let composeNav = composeEntries.length; // == length ⇒ editing the live draft
+let composeUndoVal = null;              // toggled value for the Undo button
+let composePrev = '';                   // previous field value (to detect big changes)
+function saveComposeEntries() {
+  try { localStorage.setItem(COMPOSE_HIST_KEY, JSON.stringify(composeEntries.slice(-COMPOSE_HISTORY_MAX))); } catch { /* quota */ }
+}
+let composeDraftTimer = null;
+function saveComposeDraft() {
+  clearTimeout(composeDraftTimer);
+  composeDraftTimer = setTimeout(() => { try { localStorage.setItem(COMPOSE_DRAFT_KEY, composeDraft); } catch { /* quota */ } }, 250);
+}
+
 function focusActiveInput() {
   if (composeOpen) composeInput.focus();
   else if (term) term.focus();
 }
 function autosizeCompose() {
   composeInput.style.height = 'auto';
-  composeInput.style.height = Math.min(composeInput.scrollHeight, 120) + 'px';
+  composeInput.style.height = Math.min(composeInput.scrollHeight, 220) + 'px';
+}
+function setComposeValue(v) {
+  composeInput.value = v;
+  composePrev = v;       // so the next user edit compares against this, not a stale value
+  autosizeCompose();
 }
 function openCompose() {
   composeOpen = true;
   composeEl.hidden = false;
   $('compose-btn').classList.add('armed');
-  autosizeCompose();
+  composeNav = composeEntries.length;
+  composeUndoVal = null;
+  setComposeValue(composeDraft || '');
   scheduleFit();
   composeInput.focus();
 }
@@ -1270,20 +1300,64 @@ function closeCompose() {
 }
 function toggleCompose() { if (composeOpen) closeCompose(); else openCompose(); }
 
-// Push the composed text to the terminal. withEnter also submits the line.
+function onComposeInput() {
+  const nv = composeInput.value;
+  // A big one-event change (paste / mass delete) is snapshotted so Undo reverts it.
+  if (Math.abs(nv.length - composePrev.length) >= COMPOSE_UNDO_THRESHOLD) composeUndoVal = composePrev;
+  composePrev = nv;
+  // Editing always lands on the live draft (the last history item).
+  composeNav = composeEntries.length;
+  composeDraft = nv;
+  saveComposeDraft();
+  autosizeCompose();
+}
+function composeUndo() {
+  if (composeUndoVal === null) return;
+  const cur = composeInput.value;
+  setComposeValue(composeUndoVal);
+  composeUndoVal = cur; // tap again to redo
+  composeNav = composeEntries.length;
+  composeDraft = composeInput.value;
+  saveComposeDraft();
+  composeInput.focus();
+}
+function composeHistStep(dir) { // -1 older, +1 newer
+  const draftPos = composeEntries.length;
+  composeNav = Math.max(0, Math.min(draftPos, composeNav + dir));
+  composeUndoVal = null;
+  setComposeValue(composeNav === draftPos ? composeDraft : composeEntries[composeNav]);
+  composeInput.focus();
+}
+// Push the composed text to the terminal. withEnter also submits the line. Each
+// send commits the draft as a new history item and starts a fresh draft.
 function sendCompose(withEnter) {
   const text = composeInput.value;
-  if (text) { ensureBottom(); noteInput(text); sendBytes(text); }
+  if (text) {
+    ensureBottom(); noteInput(text); sendBytes(text);
+    if (composeEntries[composeEntries.length - 1] !== text) composeEntries.push(text);
+    if (composeEntries.length > COMPOSE_HISTORY_MAX) composeEntries = composeEntries.slice(-COMPOSE_HISTORY_MAX);
+    saveComposeEntries();
+  }
   if (withEnter) { ensureBottom(); sendBytes('\r'); lastInput = ''; }
-  composeInput.value = '';
-  autosizeCompose();
+  composeDraft = '';
+  composeUndoVal = null;
+  composeNav = composeEntries.length;
+  setComposeValue('');
+  saveComposeDraft();
   composeInput.focus(); // keep the keyboard up for the next line
 }
 
 $('compose-btn').addEventListener('click', toggleCompose);
 $('compose-send').addEventListener('click', () => sendCompose(false));
 $('compose-go').addEventListener('click', () => sendCompose(true));
-composeInput.addEventListener('input', autosizeCompose);
+$('compose-undo').addEventListener('click', composeUndo);
+$('compose-prev').addEventListener('click', () => composeHistStep(-1));
+$('compose-next').addEventListener('click', () => composeHistStep(1));
+// Keep the keyboard up when tapping the action buttons (don't blur the textarea).
+for (const id of ['compose-undo', 'compose-prev', 'compose-next', 'compose-send', 'compose-go']) {
+  $(id).addEventListener('pointerdown', (e) => e.preventDefault());
+}
+composeInput.addEventListener('input', onComposeInput);
 composeInput.addEventListener('keydown', (e) => {
   // Enter submits (send + Enter); Shift+Enter inserts a newline for multi-line.
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendCompose(true); }

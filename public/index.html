@@ -95,13 +95,20 @@
     </div>
 
     <!-- Compose bar: type into a normal field (T9 / suggestions work, no IME
-         doubling), then Send to the terminal. Toggled with the ✎ button. -->
+         doubling), then Send to the terminal. Auto-grows; keeps a navigable
+         input history; Undo reverts a big paste. Toggled with the ✎ button. -->
     <div id="compose" class="compose" hidden>
       <textarea id="compose-input" class="compose-input" rows="1"
                 placeholder="Type, then Send →" enterkeyhint="send"
                 autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
-      <button id="compose-send" class="btn" title="Send text (no Enter)">Send</button>
-      <button id="compose-go" class="btn btn-primary" title="Send text + Enter">⏎</button>
+      <div class="compose-actions">
+        <button id="compose-undo" class="btn" title="Undo (e.g. a big paste)">↶</button>
+        <button id="compose-prev" class="btn" title="Previous input">↑</button>
+        <button id="compose-next" class="btn" title="Next input">↓</button>
+        <span class="compose-spacer"></span>
+        <button id="compose-send" class="btn" title="Send text (no Enter)">Send</button>
+        <button id="compose-go" class="btn btn-primary" title="Send text + Enter">⏎</button>
+      </div>
     </div>
 
     <!-- Quick-reply chips: tap sends the text + Enter. Toggled with ⚡. -->

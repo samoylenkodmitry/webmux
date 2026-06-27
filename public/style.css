@@ -260,19 +260,20 @@ html, body {
 .key.armed { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .btn.armed { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 
-/* Compose bar: plain textarea for mobile-safe input, above the soft-key row */
+/* Compose bar: plain textarea for mobile-safe input, above the soft-key row.
+   Column layout so the textarea can auto-grow full-width with an actions row. */
 .compose {
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
   gap: 6px;
   padding: 6px max(6px, env(safe-area-inset-left)) 6px;
   background: var(--bar);
   border-top: 1px solid var(--border);
 }
 .compose-input {
-  flex: 1; min-width: 0;
+  width: 100%;
   resize: none;
-  height: 40px; max-height: 120px;
+  height: 40px; max-height: 220px;
   padding: 9px 10px;
   background: var(--bg);
   color: var(--fg);
@@ -283,7 +284,9 @@ html, body {
   outline: none;
 }
 .compose-input:focus { border-color: var(--accent); }
-.compose .btn { flex: none; min-height: 40px; }
+.compose-actions { display: flex; align-items: center; gap: 6px; }
+.compose-actions .btn { flex: none; min-height: 38px; padding: 7px 12px; }
+.compose-spacer { flex: 1; }
 
 /* Quick-reply chips row (above the soft keys) */
 .snippets {
