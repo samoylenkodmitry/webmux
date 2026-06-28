@@ -61,6 +61,18 @@
             </intent-filter>
         </receiver>
 
+        <!-- UnifiedPush: receive "wake" pushes from the distributor (ntfy app). -->
+        <receiver
+            android:name=".WakeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.MESSAGE" />
+                <action android:name="org.unifiedpush.android.connector.NEW_ENDPOINT" />
+                <action android:name="org.unifiedpush.android.connector.REGISTRATION_FAILED" />
+                <action android:name="org.unifiedpush.android.connector.UNREGISTERED" />
+            </intent-filter>
+        </receiver>
+
         <!-- Soft keyboard with no keys: lets the on-device Claude inject arbitrary
              keystrokes and read/write the clipboard (only the active IME may). User
              enables it once and switches to it. -->

@@ -17,8 +17,8 @@ android {
         applicationId "dev.webmux.host"
         minSdk 26
         targetSdk 34
-        versionCode 9
-        versionName "0.9"
+        versionCode 10
+        versionName "0.10"
     }
 
     signingConfigs {
@@ -72,4 +72,9 @@ dependencies {
     implementation 'org.tukaani:xz:1.9'
     // Tiny loopback HTTP server for the phone-control API.
     implementation 'org.nanohttpd:nanohttpd:2.3.1'
+    // UnifiedPush connector: receive "wake" pushes from a distributor (the ntfy app)
+    // so a sleeping phone can be woken on demand without Google. Pinned to 3.0.x: later
+    // 3.x require kotlin-stdlib 2.2+/2.3 (Kotlin 2.2/2.3 compiler); 3.0.x uses 2.0.21,
+    // which this project's Kotlin 1.9.24 can read (metadata ≤ 2.0.0).
+    implementation 'org.unifiedpush.android:connector:3.0.10'
 }

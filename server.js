@@ -270,11 +270,13 @@ async function probeNodes(nodes) {
   const probes = nodes.map(async (n) => {
     if (n.dns) {
       const hc = httpsConn(n.ip, n.dns);
-      if (await probeWebmuxHealth(hc, 2500)) return { name: n.name, dns: n.dns, ip: n.ip, url: hc.urlBase, conn: hc };
+      const h = await probeWebmuxHealth(hc, 2500);
+      if (h) { const node = { name: n.name, dns: n.dns, ip: n.ip, url: hc.urlBase, conn: hc }; recordWakeEndpoint(node, h.wakeEndpoint); return node; }
     }
     for (const port of PEER_HTTP_PORTS) {
       const pc = httpConn(n.ip, port);
-      if (await probeWebmuxHealth(pc, 1500)) return { name: n.name, dns: n.dns || '', ip: n.ip, url: pc.urlBase, conn: pc };
+      const h = await probeWebmuxHealth(pc, 1500);
+      if (h) { const node = { name: n.name, dns: n.dns || '', ip: n.ip, url: pc.urlBase, conn: pc }; recordWakeEndpoint(node, h.wakeEndpoint); return node; }
     }
     return null;
   });
@@ -828,6 +830,64 @@ async function sendPush(payload) {
   if (dead.length) { pushSubs = pushSubs.filter((s) => !dead.includes(s.endpoint)); savePushSubs(); }
 }
 
+// --- wake-on-demand registry ----------------------------------------------
+// A phone in battery-saver sleeps when idle; to reach it we POST to its UnifiedPush
+// "wake endpoint" (served by a distributor like ntfy), which wakes the app. We learn
+// each phone's endpoint from its /api/health while it's awake and persist it, so any
+// box can wake a phone that's currently offline (and keep it listed in the picker).
+const WAKE_REGISTRY_FILE = path.join(STATE_DIR, 'wake-registry.json');
+const wakeRegistry = new Map(); // dns||ip -> { name, dns, ip, endpoint, stamp }
+let _wakeEndpoint = ''; // this box's own endpoint (Android only)
+const wakeKey = (n) => String(n.dns || n.ip || n.name || '').toLowerCase();
+
+async function loadWakeRegistry() {
+  try {
+    const a = JSON.parse(await readFile(WAKE_REGISTRY_FILE, 'utf8'));
+    if (Array.isArray(a)) for (const e of a) if (e && e.endpoint) wakeRegistry.set(wakeKey(e), e);
+  } catch { /* none yet */ }
+}
+function saveWakeRegistry() {
+  mkdir(STATE_DIR, { recursive: true })
+    .then(() => writeFile(WAKE_REGISTRY_FILE, JSON.stringify([...wakeRegistry.values()], null, 2)))
+    .catch(() => {});
+}
+// Record/refresh a peer's wake endpoint learned from its health probe.
+function recordWakeEndpoint(node, endpoint) {
+  if (!endpoint) return;
+  const key = wakeKey(node);
+  if (!key) return;
+  const prev = wakeRegistry.get(key);
+  wakeRegistry.set(key, {
+    name: node.name || (prev && prev.name) || key, dns: node.dns || '', ip: node.ip || '',
+    endpoint, stamp: Date.now(),
+  });
+  if (!prev || prev.endpoint !== endpoint) saveWakeRegistry();
+}
+// On Android, read our own endpoint from the WebMux Host control API (loopback :8084).
+function refreshWakeEndpoint() {
+  if (!IS_ANDROID) return;
+  const r = http.request({ host: '127.0.0.1', port: 8084, path: '/wake-endpoint', method: 'GET', timeout: 2000 }, (res) => {
+    let b = ''; res.on('data', (c) => (b += c));
+    res.on('end', () => { try { _wakeEndpoint = JSON.parse(b).endpoint || _wakeEndpoint; } catch { /* ignore */ } });
+  });
+  r.on('error', () => {});
+  r.end();
+}
+// POST to a UnifiedPush endpoint URL to wake the phone. Best-effort; resolves bool.
+function sendWake(endpoint) {
+  return new Promise((resolve) => {
+    let u; try { u = new URL(endpoint); } catch { return resolve(false); }
+    const mod = u.protocol === 'https:' ? https : http;
+    const r = mod.request({
+      host: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: u.pathname + u.search, method: 'POST', timeout: 6000,
+    }, (res) => { res.resume(); resolve(res.statusCode >= 200 && res.statusCode < 300); });
+    r.on('error', () => resolve(false));
+    r.on('timeout', () => { r.destroy(); resolve(false); });
+    r.end('webmux wake');
+  });
+}
+
 // Per-session activity state machine: notify once when a session goes idle for
 // IDLE_NOTIFY_MS after having produced output, while unattached.
 const IDLE_NOTIFY_MS = 12000;
@@ -930,6 +990,7 @@ const server = http.createServer(async (req, res) => {
       tmuxBin: TMUX_BIN,
       tmux: tmuxState,
       version: await webmuxVersion(),
+      wakeEndpoint: _wakeEndpoint, // UnifiedPush endpoint to wake this box (Android)
       PATH: process.env.PATH,
     });
   }
@@ -945,8 +1006,40 @@ const server = http.createServer(async (req, res) => {
     const wantPeers = status.running || seenPeers.size > 0;
     const [self, peers] = await Promise.all([tailscaleSelf(status), wantPeers ? tailscalePeers() : []]);
     // Drop the internal `conn` descriptor before sending to the browser.
-    const publicPeers = peers.map(({ conn, ...p }) => p);
-    return sendJson(res, 200, { enabled: true, port: PORT, status, self, peers: publicPeers });
+    const live = peers.map(({ conn, ...p }) => p);
+    const liveKeys = new Set(live.map((p) => wakeKey(p)));
+    for (const p of live) if (wakeRegistry.has(wakeKey(p))) p.wakeable = true;
+    // Surface known-but-currently-unreachable wakeable phones (asleep), so the picker
+    // can offer "tap to wake" instead of dropping them when their probe fails.
+    const port0 = PEER_HTTP_PORTS[0] || 8083;
+    const asleep = [];
+    for (const e of wakeRegistry.values()) {
+      if (liveKeys.has(wakeKey(e))) continue;
+      asleep.push({
+        name: e.name, dns: e.dns, ip: e.ip,
+        url: e.dns ? `https://${e.dns}/` : (e.ip ? `http://${e.ip}:${port0}/` : ''),
+        wakeable: true, asleep: true,
+      });
+    }
+    return sendJson(res, 200, { enabled: true, port: PORT, status, self, peers: [...live, ...asleep] });
+  }
+  if (url.pathname === '/api/wake') {
+    // Wake a sleeping phone by POSTing to its learned UnifiedPush endpoint.
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+    const name = (url.searchParams.get('name') || '').toLowerCase();
+    const dns = (url.searchParams.get('dns') || '').toLowerCase();
+    const ip = (url.searchParams.get('ip') || '').toLowerCase();
+    let entry = null;
+    for (const e of wakeRegistry.values()) {
+      const ek = String(e.dns || '').toLowerCase();
+      const ik = String(e.ip || '').toLowerCase();
+      const nk = String(e.name || '').toLowerCase();
+      if ((dns && ek === dns) || (ip && ik === ip) ||
+          (name && (nk === name || ek.split('.')[0] === name))) { entry = e; break; }
+    }
+    if (!entry) return sendJson(res, 404, { error: 'no wake endpoint known — open the phone once while it is awake so the fleet learns it' });
+    const ok = await sendWake(entry.endpoint);
+    return sendJson(res, 200, { ok, name: entry.name });
   }
   if (url.pathname === '/api/peer/sessions') {
     // Proxy a peer's session list so the picker can group sessions by machine
@@ -1200,6 +1293,7 @@ const heartbeat = setInterval(() => {
   // Re-assert "busy" while a session is live so the wake-lock survives a restart of
   // either side (the phone is already awake here, so this loopback ping is free).
   if (wss.clients.size > 0) postPowerBusy(true);
+  refreshWakeEndpoint(); // keep our announced UnifiedPush wake endpoint fresh (Android)
 }, HEARTBEAT_MS);
 heartbeat.unref();
 
@@ -1348,6 +1442,7 @@ server.listen(PORT, HOST, () => {
   // Sync the power signal to "idle" on boot so a wake-lock left held by a previous
   // run (e.g. webmux restarted mid-session) can't pin the phone awake forever.
   postPowerBusy(false);
+  refreshWakeEndpoint();
 });
 
 // Track recent directories: seed from current sessions, then sample so that a
@@ -1355,6 +1450,7 @@ server.listen(PORT, HOST, () => {
 await initPush();
 await loadSnippetsFile();
 await loadRecents();
+await loadWakeRegistry();
 await sampleSessions();
 
 // Adaptive background polling. An always-on phone peer holds a CPU wake-lock, so the

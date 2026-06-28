@@ -35,6 +35,14 @@ class ControlServer(private val ctx: Context, port: Int = 8084) :
             return json(Response.Status.OK, "{\"ok\":true}")
         }
 
+        // webmux reads our UnifiedPush wake endpoint here to announce it to the fleet,
+        // so any box can POST it to wake this phone when it's asleep.
+        if (s.uri == "/wake-endpoint") {
+            val ep = ctx.getSharedPreferences(HostService.PREFS, Context.MODE_PRIVATE)
+                .getString(WakeReceiver.KEY_ENDPOINT, "") ?: ""
+            return json(Response.Status.OK, "{\"endpoint\":${q(ep)}}")
+        }
+
         // Keyboard (IME) routes: full-keyboard sendkeys + clipboard. These need the
         // WebMux Keyboard to be the active input method, NOT accessibility.
         when (s.uri) {

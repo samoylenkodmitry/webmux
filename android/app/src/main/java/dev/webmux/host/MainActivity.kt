@@ -11,6 +11,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+import org.unifiedpush.android.connector.UnifiedPush
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -85,6 +86,10 @@ class MainActivity : AppCompatActivity() {
             text = saverLabel()
             setOnClickListener { toggleBatterySaver(this) }
         }
+        val wake = Button(this).apply {
+            text = "Enable remote wake (lets a sleeping phone be reached)"
+            setOnClickListener { enableWake() }
+        }
 
         val sv = ScrollView(this)
         root.addView(title)
@@ -95,6 +100,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(phoneControl)
         root.addView(keyboard)
         root.addView(saver)
+        root.addView(wake)
         root.addView(repair)
         root.addView(updateApp)
         root.addView(status)
@@ -196,6 +202,24 @@ class MainActivity : AppCompatActivity() {
             "Battery saver on: the phone sleeps when unplugged + idle; stays awake while charging or while a session is connected, and wakes when you turn the screen on."
         else
             "Battery saver off: the phone stays awake to be reachable anytime (uses more battery)."
+    }
+
+    /** Link a UnifiedPush distributor (the ntfy app) and register, so the fleet can wake this phone. */
+    private fun enableWake() {
+        val act = this
+        UnifiedPush.tryUseCurrentOrDefaultDistributor(act) { ok ->
+            runOnUiThread {
+                if (ok) {
+                    UnifiedPush.register(act, instance = HostService.WAKE_INSTANCE,
+                        messageForDistributor = "WebMux remote wake")
+                    status.text = "Remote wake: registering via your push app… it should now show a WebMux subscription. " +
+                        "If nothing happens, install the \"ntfy\" app, set its server to your orange pi, then tap again."
+                } else {
+                    status.text = "No push app found. Install \"ntfy\" (F-Droid or Play), open it once and set its " +
+                        "default server to your orange pi, then tap \"Enable remote wake\" again."
+                }
+            }
+        }
     }
 
     /** Enable + switch to the WebMux keyboard, which provides sendkeys + clipboard to Claude. */

@@ -18,6 +18,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import org.unifiedpush.android.connector.UnifiedPush
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -48,8 +49,9 @@ class HostService : Service() {
     @Volatile private var clientConnected = false
     @Volatile private var batterySaver = true
     private var graceUntil = 0L
+    private var wakeUntil = 0L
     private val powerHandler = Handler(Looper.getMainLooper())
-    private val graceTick = Runnable { recomputeWakeLock() }
+    private val powerTick = Runnable { recomputeWakeLock() }
     private var powerReceiver: BroadcastReceiver? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -59,6 +61,11 @@ class HostService : Service() {
         instance = this
         userland = Userland(this)
         initPower()
+        // Refresh our UnifiedPush registration (and thus the wake endpoint) on every
+        // start, if the user has already linked a distributor (the ntfy app).
+        if (UnifiedPush.getSavedDistributor(this) != null) {
+            runCatching { UnifiedPush.register(this, instance = WAKE_INSTANCE) }
+        }
         // Loopback phone-control API for the on-device Claude (127.0.0.1:8084).
         runCatching {
             control = ControlServer(applicationContext).apply {
@@ -72,6 +79,9 @@ class HostService : Service() {
         goForeground("Starting…")
         if (intent?.hasExtra(EXTRA_SET_SAVER) == true) {
             setBatterySaver(intent.getBooleanExtra(EXTRA_SET_SAVER, true))
+        }
+        if (intent?.getBooleanExtra(EXTRA_WAKE, false) == true) {
+            status("Woken on demand — coming online…"); beginWakeWindow(WAKE_WINDOW_MS)
         }
         val url = intent?.getStringExtra(EXTRA_ROOTFS_URL) ?: Userland.DEFAULT_ROOTFS_URL
         if (intent?.getBooleanExtra(EXTRA_REINSTALL, false) == true) pendingReinstall = true
@@ -213,15 +223,23 @@ class HostService : Service() {
     private fun recomputeWakeLock() {
         val wl = wakeLock ?: return
         val now = SystemClock.elapsedRealtime()
-        val inGrace = now < graceUntil
-        val shouldHold = !batterySaver || charging || screenOn || clientConnected || inGrace
+        val tempUntil = maxOf(graceUntil, wakeUntil) // grace after a session, or a wake-on-demand window
+        val temp = now < tempUntil
+        val persistent = !batterySaver || charging || screenOn || clientConnected
+        val shouldHold = persistent || temp
         if (shouldHold && !wl.isHeld) wl.acquire()
         else if (!shouldHold && wl.isHeld) wl.release()
-        // If only the grace window is keeping us awake, schedule a recheck at its end.
-        powerHandler.removeCallbacks(graceTick)
-        if (shouldHold && inGrace && batterySaver && !charging && !screenOn && !clientConnected) {
-            powerHandler.postDelayed(graceTick, graceUntil - now + 50)
+        // If only a temporary window is keeping us awake, schedule a recheck at its end.
+        powerHandler.removeCallbacks(powerTick)
+        if (shouldHold && temp && !persistent) {
+            powerHandler.postDelayed(powerTick, tempUntil - now + 50)
         }
+    }
+
+    /** Open a window of wakefulness so webmux resumes + Tailscale reconnects after a wake push. */
+    fun beginWakeWindow(ms: Long) {
+        wakeUntil = SystemClock.elapsedRealtime() + ms
+        recomputeWakeLock()
     }
 
     /** Called from ControlServer when webmux's connected-client count crosses 0↔1. */
@@ -239,7 +257,7 @@ class HostService : Service() {
 
     override fun onDestroy() {
         instance = null
-        powerHandler.removeCallbacks(graceTick)
+        powerHandler.removeCallbacks(powerTick)
         powerReceiver?.let { runCatching { unregisterReceiver(it) } }
         runCatching { control?.stop() }
         wakeLock?.let { if (it.isHeld) it.release() }
@@ -251,9 +269,12 @@ class HostService : Service() {
         const val EXTRA_REINSTALL = "reinstall"
         const val EXTRA_REBOOTSTRAP = "rebootstrap"
         const val EXTRA_SET_SAVER = "set_saver"
+        const val EXTRA_WAKE = "wake"
         const val PREFS = "webmux"
         const val KEY_SAVER = "battery_saver"
+        const val WAKE_INSTANCE = "webmux"
         private const val GRACE_MS = 60_000L
+        private const val WAKE_WINDOW_MS = 120_000L
         private const val TAG = "webmuxhost"
         private const val CHANNEL = "webmux-host"
         private const val NOTE_ID = 1

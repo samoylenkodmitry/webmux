@@ -1164,6 +1164,16 @@ async function loadPeerGroups() {
   const peers = (data && data.enabled && Array.isArray(data.peers)) ? data.peers : [];
   for (const p of peers) {
     if (switcherEl.hidden) return; // switcher closed meanwhile
+    // Asleep phone (battery-saver): can't list sessions; offer "tap to wake & open".
+    if (p.asleep) {
+      const row = noticeRow('💤 Asleep — tap to wake & open');
+      row.style.cursor = 'pointer';
+      const say = (t) => { row.textContent = t; };
+      row.addEventListener('click', () => wakeThenGo(p, '', say));
+      switcherList.append(groupHeader((p.name || p.dns) + ' 💤', () => wakeThenGo(p, '#new', say)));
+      switcherList.append(row);
+      continue;
+    }
     // Peer "New" opens a fresh session on that machine via a #new deep link.
     switcherList.append(groupHeader(p.name || p.dns, () => { location.href = p.url + '#new'; }));
     const loading = noticeRow('Loading…');
@@ -1181,6 +1191,22 @@ async function loadPeerGroups() {
       loading.remove();
     });
   }
+}
+
+// Wake a sleeping phone, then navigate to it once it's reachable. `setLabel` lets the
+// caller reflect progress in the picker row.
+async function wakeThenGo(peer, hash, setLabel) {
+  const say = setLabel || (() => {});
+  const who = peer.name || peer.dns || 'phone';
+  say(`Waking ${who}…`);
+  try { await fetch(`/api/wake?name=${encodeURIComponent(peer.name || peer.dns)}`, { method: 'POST' }); } catch { /* best effort */ }
+  const deadline = Date.now() + 35000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    if (peer.url && await probeReachable(peer.url)) { location.href = peer.url + hash; return; }
+    say(`Waking ${who}… (${Math.ceil((deadline - Date.now()) / 1000)}s)`);
+  }
+  say(`💤 ${who} didn't wake — tap to retry (is it charging / remote wake on?)`);
 }
 
 async function fetchPeerSessions(peer) {
