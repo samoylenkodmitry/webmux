@@ -50,6 +50,12 @@ const UPDATE_SESSION = 'webmux-update';
 // as a hard kill-switch when users don't want webmux invoking `tailscale` at all.
 const TAILSCALE_ENABLED = process.env.WEBMUX_TAILSCALE === '1';
 
+// Set by the Android WebMux Host (Userland.startWebmux). On a phone there's no
+// systemd, so self-update can't `systemctl restart`; instead we pull and let the
+// host's runWebmuxForever supervisor restart the process. Also drives battery
+// back-off (slower polling when no client is attached).
+const IS_ANDROID = process.env.WEBMUX_ANDROID === '1';
+
 // Path to the tailscale CLI, used for /api/tailnet. Resolved lazily so a launchd
 // service with a minimal PATH still finds it in common install locations.
 // Memoize the lookup as a single shared promise so parallel callers (status +
@@ -424,6 +430,26 @@ async function startUpdateSession() {
     'exec "${SHELL:-/bin/sh}"';
   await tmux(['new-session', '-d', '-s', UPDATE_SESSION, script]);
   // Survive having no client attached (e.g. while the service restarts).
+  try { await tmux(['set-option', '-t', UPDATE_SESSION, 'destroy-unattached', 'off']); } catch { /* best effort */ }
+}
+
+// Self-update on Android: there's no systemd, so the installer's `systemctl restart`
+// is a no-op and the box would keep serving the old code forever ("stuck updating").
+// Instead, pull origin/main in an independent tmux session (the box's tmux server
+// outlives this Node process), then `kill` ourselves — the WebMux Host's
+// runWebmuxForever supervisor immediately re-execs `node server.js` on the fresh
+// checkout. Same PID namespace under proot, so the kill reaches us.
+async function startAndroidSelfUpdate() {
+  try { await tmux(['kill-session', '-t', `=${UPDATE_SESSION}`]); } catch { /* none running yet */ }
+  const script =
+    "clear 2>/dev/null; printf '\\033[1m== webmux update (android) ==\\033[0m\\n'; " +
+    `cd ${__dirname} && ` +
+    'git fetch --quiet origin main && git reset --hard origin/main && ' +
+    '(npm install --no-audit --no-fund || true); ' +
+    "printf '\\n== pulled — restarting webmux ==\\n'; " +
+    `kill ${process.pid}; ` +
+    'exec "${SHELL:-/bin/sh}"';
+  await tmux(['new-session', '-d', '-s', UPDATE_SESSION, script]);
   try { await tmux(['set-option', '-t', UPDATE_SESSION, 'destroy-unattached', 'off']); } catch { /* best effort */ }
 }
 
@@ -1052,8 +1078,9 @@ const server = http.createServer(async (req, res) => {
     const scope = url.searchParams.get('scope') || 'self';
     if (scope === 'self') {
       // This machine updates itself (direct, or because a coordinator fanned out
-      // to us). Runs in a watchable tmux session that survives the restart.
-      try { await startUpdateSession(); }
+      // to us). Runs in a watchable tmux session that survives the restart. On
+      // Android there's no systemd, so use the pull-and-respawn path instead.
+      try { await (IS_ANDROID ? startAndroidSelfUpdate() : startUpdateSession()); }
       catch (e) { return sendJson(res, 500, { error: 'could not start update: ' + (e.message || e) }); }
       return sendJson(res, 200, { ok: true, session: UPDATE_SESSION, version: await webmuxVersion() });
     }
@@ -1299,17 +1326,27 @@ await initPush();
 await loadSnippetsFile();
 await loadRecents();
 await sampleSessions();
-const sampler = setInterval(() => { sampleSessions().catch(() => {}); }, 5000);
-sampler.unref();
 
-// Background discovery heartbeat: periodically probe peers even when no one is viewing
-// this node's picker. Each probe carries our X-Webmux-Self tag, so peers that can't run
-// `tailscale status` (a phone's proot) learn us from it. Without this, a phone only sees
-// peers whose pickers happen to be open. (No-op if Tailscale discovery is disabled.)
+// Adaptive background polling. An always-on phone peer holds a CPU wake-lock, so the
+// dominant battery cost is how often we wake the cores. When no client is attached
+// nobody's watching this node's picker, so we slow everything down; a connecting
+// client restores fast rates within one idle cycle. Self-rescheduling (not a fixed
+// setInterval) so the *timer itself* fires less often, not just its body.
+const busy = () => wss.clients.size > 0;
+
+// Recent-dir sampler: 5s attached / 30s idle.
+(function sampleLoop() {
+  setTimeout(() => { sampleSessions().catch(() => {}).finally(sampleLoop); }, busy() ? 5000 : 30_000).unref();
+})();
+
+// Discovery: probe peers so this node learns the fleet. Each probe carries our
+// X-Webmux-Self tag, so peers that can't run `tailscale status` (a phone's proot)
+// learn us from it. 25s attached / 120s idle. (No-op if Tailscale is disabled.)
 if (TAILSCALE_ENABLED) {
-  const discoveryBeat = setInterval(() => { tailscalePeers().catch(() => {}); }, 25_000);
-  discoveryBeat.unref();
   tailscalePeers().catch(() => {});
+  (function discoveryLoop() {
+    setTimeout(() => { tailscalePeers().catch(() => {}).finally(discoveryLoop); }, busy() ? 25_000 : 120_000).unref();
+  })();
 }
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
