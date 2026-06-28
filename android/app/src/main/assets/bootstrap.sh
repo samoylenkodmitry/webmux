@@ -82,6 +82,14 @@ case "$c" in
 esac
 PHONE
 chmod +x /usr/local/bin/phone
+
+# fleet CLI/MCP lives in the webmux checkout so it updates with `git pull`. Thin wrapper:
+cat > /usr/local/bin/fleet <<'FLEET'
+#!/bin/bash
+exec node /opt/webmux/tools/fleet.cjs "$@"
+FLEET
+chmod +x /usr/local/bin/fleet
+
 cat > /root/CLAUDE.md <<'GUIDE'
 # You are running on an Android phone
 
@@ -106,6 +114,19 @@ If `phone health` shows accessibility:false, the user must enable "WebMux Host" 
 Android Settings → Accessibility. If keyboard:false, the user must enable + switch to
 the "WebMux Keyboard" (open the WebMux Host app → Enable keyboard). You also have all
 of these as native MCP tools (phone:*).
+
+## You are one node in a webmux fleet
+
+Other phones + PCs on the tailnet run webmux too. Operate across them with `fleet`:
+
+- `fleet list` — every node (name, url, asleep/wakeable); the one marked `you_are_here` is you
+- `fleet run <node> "<cmd>"` — run a shell command on any node and get its output (`self` = here)
+- `fleet sessions [node]` — tmux sessions on a node
+- `fleet wake <node>` — wake a sleeping phone so it becomes reachable, then act on it
+- `fleet ask <node> "<prompt>"` — send a prompt to another node's Claude and read the reply
+
+Also native MCP tools (fleet:*). Phone control is local-only by design: to drive a
+*different* phone, `fleet ask` its on-device Claude to run the `phone …` commands there.
 GUIDE
 
 echo "BOOT: install phone MCP server for Claude"
@@ -177,6 +198,10 @@ chmod +x /usr/local/lib/phone-mcp.js
 echo "BOOT: register phone MCP with Claude (user scope)"
 claude mcp remove phone -s user 2>/dev/null || true
 claude mcp add phone -s user -- node /usr/local/lib/phone-mcp.js 2>&1 | tail -1 || echo "BOOT: mcp add failed (phone CLI still works)"
+
+echo "BOOT: register fleet MCP with Claude (user scope)"
+claude mcp remove fleet -s user 2>/dev/null || true
+claude mcp add fleet -s user -- node /opt/webmux/tools/fleet.cjs 2>&1 | tail -1 || echo "BOOT: fleet mcp add failed (fleet CLI still works)"
 
 echo "BOOT: done"
 touch /opt/.webmux-bootstrapped

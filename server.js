@@ -990,6 +990,7 @@ const server = http.createServer(async (req, res) => {
       tmuxBin: TMUX_BIN,
       tmux: tmuxState,
       version: await webmuxVersion(),
+      android: IS_ANDROID, // a phone box vs a PC (both report platform "linux")
       wakeEndpoint: _wakeEndpoint, // UnifiedPush endpoint to wake this box (Android)
       PATH: process.env.PATH,
     });
@@ -1040,6 +1041,24 @@ const server = http.createServer(async (req, res) => {
     if (!entry) return sendJson(res, 404, { error: 'no wake endpoint known — open the phone once while it is awake so the fleet learns it' });
     const ok = await sendWake(entry.endpoint);
     return sendJson(res, 200, { ok, name: entry.name });
+  }
+  if (url.pathname === '/api/peer/broadcast') {
+    // Run a command on ONE peer (the `fleet run <node>` path): this box → that peer's
+    // /api/broadcast?scope=self. Same peer-allowlist guard as the other peer proxies.
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+    if (!TAILSCALE_ENABLED) return sendJson(res, 200, { result: null });
+    const dns = url.searchParams.get('dns') || '';
+    const ip = url.searchParams.get('ip') || '';
+    const body = await readBody(req);
+    const cmd = typeof body.cmd === 'string' ? body.cmd : '';
+    if (!cmd.trim()) return sendJson(res, 400, { error: 'no command' });
+    const peers = await tailscalePeers();
+    const match = peers.find((p) => p.dns === dns && p.ip === ip) ||
+      peers.find((p) => ip && p.ip === ip) || peers.find((p) => dns && p.dns === dns);
+    if (!match) return sendJson(res, 404, { error: 'unknown peer' });
+    const r = await postPeerJson(match.conn, '/api/broadcast', { cmd }, 24000);
+    const one = r && Array.isArray(r.results) && r.results[0];
+    return sendJson(res, 200, { result: one || { host: match.name, ok: false, output: 'unreachable or too old' } });
   }
   if (url.pathname === '/api/peer/sessions') {
     // Proxy a peer's session list so the picker can group sessions by machine
@@ -1444,6 +1463,14 @@ server.listen(PORT, HOST, () => {
   postPowerBusy(false);
   refreshWakeEndpoint();
 });
+
+// Phones bind to their tailnet IP (HOST=$ip), so the local `fleet` tool can't use
+// 127.0.0.1. Add a loopback listener that re-dispatches into the same handler.
+if (HOST !== '127.0.0.1' && HOST !== 'localhost' && HOST !== '::1') {
+  const loopback = http.createServer((req, res) => server.emit('request', req, res));
+  loopback.on('error', (e) => console.error('loopback listener:', e.message));
+  loopback.listen(PORT, '127.0.0.1');
+}
 
 // Track recent directories: seed from current sessions, then sample so that a
 // session disappearing records its last directory into the history.

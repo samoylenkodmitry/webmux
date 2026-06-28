@@ -366,6 +366,21 @@ if ! "$NODE_BIN" -e 'try{require("./node_modules/node-pty").spawn("/bin/sh",["-c
     || warn "node-pty rebuild failed. Install a C++ toolchain (macOS: xcode-select --install; Debian/Ubuntu: build-essential) and re-run."
 fi
 
+# --- fleet tool: let a Claude/Codex on this node see + operate the whole tailnet ---
+mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/fleet" <<FLEET
+#!/bin/sh
+exec "$NODE_BIN" "$DIR/tools/fleet.cjs" "\$@"
+FLEET
+chmod +x "$HOME/.local/bin/fleet"
+say "Installed 'fleet' CLI → ~/.local/bin/fleet  (try: fleet list)"
+if command -v claude >/dev/null 2>&1; then
+  claude mcp remove fleet -s user >/dev/null 2>&1 || true
+  if claude mcp add fleet -s user -- "$NODE_BIN" "$DIR/tools/fleet.cjs" >/dev/null 2>&1; then
+    say "Registered 'fleet' MCP with Claude on this machine (fleet_list / fleet_run / …)"
+  fi
+fi
+
 # A service starts with a minimal PATH that often misses Homebrew, so bake a good
 # PATH and the resolved tmux path in.
 SVC_PATH="$(dirname "$NODE_BIN")"
