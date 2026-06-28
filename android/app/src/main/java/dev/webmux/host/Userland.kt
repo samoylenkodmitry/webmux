@@ -21,6 +21,9 @@ import java.net.URL
  * (jniLibs) so they land in nativeLibraryDir, the one app-writable dir Android still
  * lets us execute from. The rootfs is data and downloads on first run.
  */
+/** Result of a box freshness check: the resulting short version, and whether HEAD moved. */
+class BoxSync(val version: String?, val changed: Boolean)
+
 class Userland(private val ctx: Context) {
 
     val nativeLibDir: String = ctx.applicationInfo.nativeLibraryDir
@@ -244,6 +247,50 @@ class Userland(private val ctx: Context) {
             guestEnv = listOf("HOST=$ip", "PORT=$port", "WEBMUX_TAILSCALE=1", "WEBMUX_ANDROID=1"),
         )
 
+    /**
+     * Make the running webmux exit so the supervisor restarts it (on freshly-pulled code,
+     * or after a rebootstrap). We signal the node process *inside* the box — it traps
+     * SIGTERM and shuts down cleanly, releasing the port — rather than SIGKILLing the
+     * proot wrapper, which would orphan node still holding :8083. Graceful first, then a
+     * direct SIGKILL of node (not proot) as a fallback so the port is always freed.
+     */
+    fun stopWebmux() {
+        runCatching {
+            runStreaming(listOf("/bin/bash", "-lc",
+                "pkill -TERM -f 'node server.js' 2>/dev/null; " +
+                "for i in 1 2 3 4 5; do pgrep -f 'node server.js' >/dev/null 2>&1 || exit 0; sleep 1; done; " +
+                "pkill -KILL -f 'node server.js' 2>/dev/null; exit 0"
+            )) { /* ignore output */ }
+        }
+    }
+
+    // --- box freshness (self-heal a stale webmux checkout) -------------------
+
+    /** The webmux checkout's short git HEAD (what /api/health reports), or null. */
+    fun boxVersion(): String? {
+        if (!File(rootfs, "opt/webmux/.git").exists()) return null
+        val sb = StringBuilder()
+        return try {
+            runStreaming(listOf("/bin/bash", "-lc", "cd /opt/webmux && git rev-parse --short HEAD 2>/dev/null")) {
+                sb.append(it.trim())
+            }
+            sb.toString().take(40).ifBlank { null }
+        } catch (_: Throwable) { null }
+    }
+
+    /**
+     * Fast-forward the box's webmux to origin/main and reinstall npm deps ONLY if the
+     * manifest changed (node-pty is a native build — don't pay it for a server.js edit).
+     * This is the light path the supervisor runs periodically; the full Repair re-runs
+     * bootstrap.sh for toolchain changes. Returns the resulting version + whether it moved.
+     */
+    fun syncWebmuxCode(onLine: (String) -> Unit): BoxSync {
+        val before = boxVersion()
+        runCatching { runStreaming(listOf("/bin/bash", "-lc", SYNC_SCRIPT), cwd = "/opt/webmux", onLine = onLine) }
+        val after = boxVersion()
+        return BoxSync(after, before != null && after != null && before != after)
+    }
+
     private fun lremove(f: File) {
         try {
             val st = Os.lstat(f.absolutePath)
@@ -283,6 +330,23 @@ apt-get update -y
 echo "BOOT: apt install build tools"
 apt-get install -y --no-install-recommends ca-certificates git curl xz-utils procps python3 make g++ tmux
 echo "BOOT: apt done"
+"""
+
+        // Light box update: fast-forward webmux, rebuild deps only if the manifest moved.
+        // `timeout` bounds the network ops so a dead connection can't stall bring-up.
+        const val SYNC_SCRIPT = """
+cd /opt/webmux 2>/dev/null || exit 0
+before=${'$'}(git rev-parse HEAD 2>/dev/null)
+echo "BOOT: checking webmux (${'$'}(git rev-parse --short HEAD 2>/dev/null))"
+timeout 90 git pull --ff-only 2>&1 || true
+after=${'$'}(git rev-parse HEAD 2>/dev/null)
+if [ "${'$'}before" != "${'$'}after" ]; then
+  echo "BOOT: webmux ${'$'}before -> ${'$'}after"
+  if ! git diff --quiet "${'$'}before" "${'$'}after" -- package.json package-lock.json 2>/dev/null; then
+    echo "BOOT: deps changed — npm install"
+    timeout 600 npm install 2>&1 | tail -3 || true
+  fi
+fi
 """
 
         // Pinned rootfs the app downloads on first run. Swapped to the GitHub Release

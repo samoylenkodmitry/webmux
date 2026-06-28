@@ -17,8 +17,8 @@ android {
         applicationId "dev.webmux.host"
         minSdk 26
         targetSdk 34
-        versionCode 12
-        versionName "0.12"
+        versionCode 16
+        versionName "0.16"
     }
 
     signingConfigs {

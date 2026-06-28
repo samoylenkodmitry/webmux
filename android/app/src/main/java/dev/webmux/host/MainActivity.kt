@@ -28,6 +28,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var updateBanner: Button
     private lateinit var checklist: LinearLayout
+    private lateinit var hostInfo: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,6 +42,8 @@ class MainActivity : AppCompatActivity() {
             text = "Run tmux + Claude on this phone and reach it from any webmux on your tailnet."
             textSize = 14f; setPadding(0, 12, 0, 8)
         })
+        hostInfo = TextView(this).apply { textSize = 12f; alpha = 0.6f; setPadding(0, 4, 0, 0) }
+        root.addView(hostInfo)
         updateBanner = Button(this).apply { visibility = View.GONE; setOnClickListener { updateApp() } }
         root.addView(updateBanner)
 
@@ -79,6 +82,15 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refreshChecklist()
+        refreshHostInfo()
+    }
+
+    /** Show the app version and the box's webmux version side by side — a lagging box
+     *  (new app, old webmux inside) is the kind of mismatch that used to be invisible. */
+    private fun refreshHostInfo() {
+        val app = SelfUpdate.currentVersion(this)
+        val box = HostService.lastBoxVersion
+        hostInfo.text = "App v$app" + (box?.let { " · box webmux $it" } ?: "")
     }
 
     // --- checklist ----------------------------------------------------------

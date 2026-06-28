@@ -39,6 +39,13 @@ class HostService : Service() {
     @Volatile private var pendingReinstall = false
     @Volatile private var pendingRebootstrap = false
 
+    // Box freshness: the app updates itself from GitHub, but the webmux *inside* the box
+    // is a separate git checkout that can silently lag (new app + old box). We pull it
+    // forward on startup and periodically while charging so it never gets stuck.
+    @Volatile private var fleetUrl: String? = null
+    @Volatile private var lastBoxSyncAt = 0L
+    private val boxSyncing = AtomicBoolean(false)
+
     // --- power policy -------------------------------------------------------
     // The wake-lock is what stops the phone from sleeping. Holding it 24/7 is the
     // dominant battery cost, so we hold it only when the phone is actually in use
@@ -90,9 +97,11 @@ class HostService : Service() {
             Thread { supervise(url) }.start()
         } else if (pendingReinstall || pendingRebootstrap) {
             // Supervisor already running: bounce webmux so the loop re-pulls on fresh
-            // code (the flags are read at the top of the next iteration).
+            // code (the flags are read at the top of the next iteration). Stop node from
+            // inside the box (off the main thread) — destroying the proot wrapper doesn't
+            // reliably kill the child, which left the supervisor parked on the old build.
             status("Applying update — restarting webmux…")
-            webmuxProc?.destroy()
+            Thread { userland.stopWebmux() }.start()
         }
         return START_STICKY
     }
@@ -132,7 +141,11 @@ class HostService : Service() {
                 status("Starting webmux on $ip:8083…")
                 val proc = userland.startWebmux(ip)
                 webmuxProc = proc
-                status("✓ On the fleet — http://$ip:8083")
+                fleetUrl = "http://$ip:8083"
+                status(fleetText())
+                // Heal a stale box: pull webmux forward (the app self-updates, the box
+                // doesn't). Runs in the background so bring-up isn't blocked on the fetch.
+                scheduleBoxSync()
                 // Drain stdout until it ends. A Repair/reinstall calls webmuxProc.destroy(),
                 // which closes this stream mid-read and throws "read interrupted by close()";
                 // swallow it so the bounce falls through to restart instead of killing the
@@ -159,6 +172,56 @@ class HostService : Service() {
             Thread.sleep(1500)
         }
         return Userland.findTailnetIp()
+    }
+
+    private fun fleetText(): String {
+        val v = lastBoxVersion?.let { " (webmux $it)" } ?: ""
+        val u = fleetUrl?.let { " — $it" } ?: ""
+        return "✓ On the fleet$v$u"
+    }
+
+    /**
+     * Detect + heal a stale box. Throttled to one network check per BOX_SYNC_INTERVAL_MS
+     * (always allowed on the first check since the service started, so a boot/wake heals
+     * promptly); periodic re-checks wait until the phone is charging so they cost nothing
+     * on battery. If the pull moves HEAD, bounce webmux so the supervisor restarts node on
+     * the new code. Runs off-thread; never blocks the supervisor.
+     */
+    private fun scheduleBoxSync() {
+        val now = SystemClock.elapsedRealtime()
+        val first = lastBoxSyncAt == 0L
+        if (!first && now - lastBoxSyncAt < BOX_SYNC_INTERVAL_MS) return
+        if (!first && batterySaver && !charging) return
+        if (!boxSyncing.compareAndSet(false, true)) return
+        lastBoxSyncAt = now
+        Thread {
+            try {
+                val r = userland.syncWebmuxCode { l ->
+                    if (l.startsWith("BOOT:")) status(l.removePrefix("BOOT:").trim())
+                }
+                lastBoxVersion = r.version
+                if (r.changed && webmuxProc != null) {
+                    status("Updated webmux to ${r.version} — restarting…")
+                    userland.stopWebmux() // node exits cleanly; supervisor restarts it on the new code
+                } else {
+                    status(fleetText())
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "box sync failed", t); status(fleetText())
+            } finally {
+                boxSyncing.set(false)
+            }
+        }.start()
+    }
+
+    // Periodic freshness check for a box that's been running old code for a long time
+    // (its supervisor is parked in waitFor() and never re-pulls on its own). Only acts
+    // while charging and with no client attached, so it never disrupts active use.
+    private val boxSyncTick = object : Runnable {
+        override fun run() {
+            if (webmuxProc != null && charging && !clientConnected) scheduleBoxSync()
+            powerHandler.postDelayed(this, BOX_SYNC_INTERVAL_MS)
+        }
     }
 
     private fun status(text: String) {
@@ -221,6 +284,7 @@ class HostService : Service() {
             addAction(Intent.ACTION_POWER_DISCONNECTED)
         })
         recomputeWakeLock()
+        powerHandler.postDelayed(boxSyncTick, BOX_SYNC_INTERVAL_MS)
     }
 
     /** Hold the wake-lock only while the phone is in use; otherwise let it sleep. */
@@ -263,6 +327,7 @@ class HostService : Service() {
     override fun onDestroy() {
         instance = null
         powerHandler.removeCallbacks(powerTick)
+        powerHandler.removeCallbacks(boxSyncTick)
         powerReceiver?.let { runCatching { unregisterReceiver(it) } }
         runCatching { control?.stop() }
         wakeLock?.let { if (it.isHeld) it.release() }
@@ -280,7 +345,13 @@ class HostService : Service() {
         const val WAKE_INSTANCE = "webmux"
         private const val GRACE_MS = 60_000L
         private const val WAKE_WINDOW_MS = 120_000L
+        private const val BOX_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000L // 6h between freshness checks
         private const val TAG = "webmuxhost"
+
+        // The box's webmux version (git short HEAD), surfaced to MainActivity so a
+        // new-app/old-box mismatch is visible. Filled by the first freshness check.
+        @Volatile
+        var lastBoxVersion: String? = null
         private const val CHANNEL = "webmux-host"
         private const val NOTE_ID = 1
 
