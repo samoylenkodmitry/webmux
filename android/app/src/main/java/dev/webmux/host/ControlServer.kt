@@ -28,6 +28,13 @@ class ControlServer(private val ctx: Context, port: Int = 8084) :
                 "{\"ok\":true,\"accessibility\":${PhoneControlService.instance != null}," +
                     "\"keyboard\":${WebMuxIme.instance != null}}")
 
+        // webmux pings this when its connected-client count crosses 0↔1 so the service
+        // can hold the wake-lock only while a session is live (battery policy).
+        if (s.uri == "/power") {
+            HostService.instance?.setClientConnected(p("busy") == "1")
+            return json(Response.Status.OK, "{\"ok\":true}")
+        }
+
         // Keyboard (IME) routes: full-keyboard sendkeys + clipboard. These need the
         // WebMux Keyboard to be the active input method, NOT accessibility.
         when (s.uri) {

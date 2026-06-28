@@ -4,11 +4,18 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.os.BatteryManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.util.concurrent.atomic.AtomicBoolean
@@ -31,12 +38,27 @@ class HostService : Service() {
     @Volatile private var pendingReinstall = false
     @Volatile private var pendingRebootstrap = false
 
+    // --- power policy -------------------------------------------------------
+    // The wake-lock is what stops the phone from sleeping. Holding it 24/7 is the
+    // dominant battery cost, so we hold it only when the phone is actually in use
+    // (charging, screen on, or a webmux session connected) plus a short grace after
+    // the last disconnect — otherwise we release it and let the device suspend.
+    @Volatile private var screenOn = true
+    @Volatile private var charging = false
+    @Volatile private var clientConnected = false
+    @Volatile private var batterySaver = true
+    private var graceUntil = 0L
+    private val powerHandler = Handler(Looper.getMainLooper())
+    private val graceTick = Runnable { recomputeWakeLock() }
+    private var powerReceiver: BroadcastReceiver? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         userland = Userland(this)
-        acquireWakeLock()
+        initPower()
         // Loopback phone-control API for the on-device Claude (127.0.0.1:8084).
         runCatching {
             control = ControlServer(applicationContext).apply {
@@ -48,6 +70,9 @@ class HostService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         goForeground("Starting…")
+        if (intent?.hasExtra(EXTRA_SET_SAVER) == true) {
+            setBatterySaver(intent.getBooleanExtra(EXTRA_SET_SAVER, true))
+        }
         val url = intent?.getStringExtra(EXTRA_ROOTFS_URL) ?: Userland.DEFAULT_ROOTFS_URL
         if (intent?.getBooleanExtra(EXTRA_REINSTALL, false) == true) pendingReinstall = true
         if (intent?.getBooleanExtra(EXTRA_REBOOTSTRAP, false) == true) pendingRebootstrap = true
@@ -155,15 +180,67 @@ class HostService : Service() {
         }
     }
 
-    private fun acquireWakeLock() {
-        val pm = getSystemService(PowerManager::class.java) ?: return
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "webmux:host").apply {
+    private fun initPower() {
+        val pm = getSystemService(PowerManager::class.java)
+        wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "webmux:host")?.apply {
             setReferenceCounted(false)
-            acquire()
+        }
+        batterySaver = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_SAVER, true)
+        screenOn = pm?.isInteractive ?: true
+        charging = getSystemService(BatteryManager::class.java)?.isCharging ?: false
+        powerReceiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, i: Intent?) {
+                when (i?.action) {
+                    Intent.ACTION_SCREEN_ON -> screenOn = true
+                    Intent.ACTION_SCREEN_OFF -> screenOn = false
+                    Intent.ACTION_POWER_CONNECTED -> charging = true
+                    Intent.ACTION_POWER_DISCONNECTED -> charging = false
+                }
+                recomputeWakeLock()
+            }
+        }
+        registerReceiver(powerReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+        })
+        recomputeWakeLock()
+    }
+
+    /** Hold the wake-lock only while the phone is in use; otherwise let it sleep. */
+    @Synchronized
+    private fun recomputeWakeLock() {
+        val wl = wakeLock ?: return
+        val now = SystemClock.elapsedRealtime()
+        val inGrace = now < graceUntil
+        val shouldHold = !batterySaver || charging || screenOn || clientConnected || inGrace
+        if (shouldHold && !wl.isHeld) wl.acquire()
+        else if (!shouldHold && wl.isHeld) wl.release()
+        // If only the grace window is keeping us awake, schedule a recheck at its end.
+        powerHandler.removeCallbacks(graceTick)
+        if (shouldHold && inGrace && batterySaver && !charging && !screenOn && !clientConnected) {
+            powerHandler.postDelayed(graceTick, graceUntil - now + 50)
         }
     }
 
+    /** Called from ControlServer when webmux's connected-client count crosses 0↔1. */
+    fun setClientConnected(connected: Boolean) {
+        clientConnected = connected
+        if (!connected) graceUntil = SystemClock.elapsedRealtime() + GRACE_MS
+        recomputeWakeLock()
+    }
+
+    fun setBatterySaver(on: Boolean) {
+        batterySaver = on
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_SAVER, on).apply()
+        recomputeWakeLock()
+    }
+
     override fun onDestroy() {
+        instance = null
+        powerHandler.removeCallbacks(graceTick)
+        powerReceiver?.let { runCatching { unregisterReceiver(it) } }
         runCatching { control?.stop() }
         wakeLock?.let { if (it.isHeld) it.release() }
         super.onDestroy()
@@ -173,8 +250,16 @@ class HostService : Service() {
         const val EXTRA_ROOTFS_URL = "rootfs_url"
         const val EXTRA_REINSTALL = "reinstall"
         const val EXTRA_REBOOTSTRAP = "rebootstrap"
+        const val EXTRA_SET_SAVER = "set_saver"
+        const val PREFS = "webmux"
+        const val KEY_SAVER = "battery_saver"
+        private const val GRACE_MS = 60_000L
         private const val TAG = "webmuxhost"
         private const val CHANNEL = "webmux-host"
         private const val NOTE_ID = 1
+
+        // So ControlServer (loopback /power) can feed the connected-client signal in.
+        @Volatile
+        var instance: HostService? = null
     }
 }

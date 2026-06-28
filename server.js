@@ -1197,8 +1197,31 @@ const heartbeat = setInterval(() => {
     ws.isAlive = false;
     try { ws.ping(); } catch { /* ignore */ }
   }
+  // Re-assert "busy" while a session is live so the wake-lock survives a restart of
+  // either side (the phone is already awake here, so this loopback ping is free).
+  if (wss.clients.size > 0) postPowerBusy(true);
 }, HEARTBEAT_MS);
 heartbeat.unref();
+
+// On Android, tell the WebMux Host service when our connected-client count crosses
+// 0↔1 (loopback control API on :8084). It then holds the CPU wake-lock only while a
+// session is live, so an idle phone can sleep instead of draining battery.
+let _powerBusy = false;
+function postPowerBusy(busy) {
+  if (!IS_ANDROID) return;
+  const r = http.request(
+    { host: '127.0.0.1', port: 8084, path: `/power?busy=${busy ? 1 : 0}`, method: 'POST', timeout: 2000 },
+    (res) => res.resume()
+  );
+  r.on('error', () => {});
+  r.end();
+}
+function refreshPowerSignal() {
+  const busy = wss.clients.size > 0;
+  if (busy === _powerBusy) return;
+  _powerBusy = busy;
+  postPowerBusy(busy);
+}
 
 function sendCtrl(ws, obj) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
@@ -1225,7 +1248,11 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy();
     return;
   }
-  wss.handleUpgrade(req, socket, head, (ws) => startSession(ws, mode, name, url));
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    refreshPowerSignal();
+    ws.on('close', () => setImmediate(refreshPowerSignal));
+    startSession(ws, mode, name, url);
+  });
 });
 
 async function startSession(ws, mode, name, url) {
@@ -1318,6 +1345,9 @@ async function startSession(ws, mode, name, url) {
 
 server.listen(PORT, HOST, () => {
   console.log(`webmux listening on http://${HOST}:${PORT}`);
+  // Sync the power signal to "idle" on boot so a wake-lock left held by a previous
+  // run (e.g. webmux restarted mid-session) can't pin the phone awake forever.
+  postPowerBusy(false);
 });
 
 // Track recent directories: seed from current sessions, then sample so that a

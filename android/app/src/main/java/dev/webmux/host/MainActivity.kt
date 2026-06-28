@@ -81,6 +81,10 @@ class MainActivity : AppCompatActivity() {
             text = "Enable keyboard (sendkeys + clipboard)"
             setOnClickListener { enableKeyboard() }
         }
+        val saver = Button(this).apply {
+            text = saverLabel()
+            setOnClickListener { toggleBatterySaver(this) }
+        }
 
         val sv = ScrollView(this)
         root.addView(title)
@@ -90,6 +94,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(battery)
         root.addView(phoneControl)
         root.addView(keyboard)
+        root.addView(saver)
         root.addView(repair)
         root.addView(updateApp)
         root.addView(status)
@@ -171,6 +176,26 @@ class MainActivity : AppCompatActivity() {
                 updateBanner.visibility = View.VISIBLE
             }
         }.start()
+    }
+
+    private fun saverOn(): Boolean =
+        getSharedPreferences(HostService.PREFS, MODE_PRIVATE).getBoolean(HostService.KEY_SAVER, true)
+
+    private fun saverLabel(): String =
+        "Battery saver: " + if (saverOn()) "ON (sleeps when unplugged)" else "OFF (always reachable)"
+
+    /** Toggle the wake-lock policy: sleep-when-idle vs always-awake. Applied to the live service. */
+    private fun toggleBatterySaver(button: Button) {
+        val now = !saverOn()
+        getSharedPreferences(HostService.PREFS, MODE_PRIVATE).edit().putBoolean(HostService.KEY_SAVER, now).apply()
+        ContextCompat.startForegroundService(
+            this, Intent(this, HostService::class.java).putExtra(HostService.EXTRA_SET_SAVER, now)
+        )
+        button.text = saverLabel()
+        status.text = if (now)
+            "Battery saver on: the phone sleeps when unplugged + idle; stays awake while charging or while a session is connected, and wakes when you turn the screen on."
+        else
+            "Battery saver off: the phone stays awake to be reachable anytime (uses more battery)."
     }
 
     /** Enable + switch to the WebMux keyboard, which provides sendkeys + clipboard to Claude. */
