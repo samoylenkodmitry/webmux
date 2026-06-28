@@ -133,7 +133,12 @@ class HostService : Service() {
                 val proc = userland.startWebmux(ip)
                 webmuxProc = proc
                 status("✓ On the fleet — http://$ip:8083")
-                proc.inputStream.bufferedReader().forEachLine { Log.i(TAG, it) }
+                // Drain stdout until it ends. A Repair/reinstall calls webmuxProc.destroy(),
+                // which closes this stream mid-read and throws "read interrupted by close()";
+                // swallow it so the bounce falls through to restart instead of killing the
+                // whole supervisor (which left phones stuck on the old version).
+                try { proc.inputStream.bufferedReader().forEachLine { Log.i(TAG, it) } }
+                catch (_: Throwable) { /* stream closed by a bounce — fall through */ }
                 val rc = proc.waitFor()
                 webmuxProc = null
                 val why = if (pendingRebootstrap || pendingReinstall) "applying update" else "rc=$rc"
