@@ -83,13 +83,6 @@ esac
 PHONE
 chmod +x /usr/local/bin/phone
 
-# fleet CLI/MCP lives in the webmux checkout so it updates with `git pull`. Thin wrapper:
-cat > /usr/local/bin/fleet <<'FLEET'
-#!/bin/bash
-exec node /opt/webmux/tools/fleet.cjs "$@"
-FLEET
-chmod +x /usr/local/bin/fleet
-
 cat > /root/CLAUDE.md <<'GUIDE'
 # You are running on an Android phone
 
@@ -115,18 +108,19 @@ Android Settings → Accessibility. If keyboard:false, the user must enable + sw
 the "WebMux Keyboard" (open the WebMux Host app → Enable keyboard). You also have all
 of these as native MCP tools (phone:*).
 
-## You are one node in a webmux fleet
+## Operating other fleet nodes (only when a task needs it)
 
-Other phones + PCs on the tailnet run webmux too. Operate across them with `fleet`:
+You're one node among other phones + PCs on the tailnet. You have `fleet:*` MCP tools to
+reach them — use them ONLY when a task genuinely requires another node, not routinely:
 
-- `fleet list` — every node (name, url, asleep/wakeable); the one marked `you_are_here` is you
-- `fleet run <node> "<cmd>"` — run a shell command on any node and get its output (`self` = here)
-- `fleet sessions [node]` — tmux sessions on a node
-- `fleet wake <node>` — wake a sleeping phone so it becomes reachable, then act on it
-- `fleet ask <node> "<prompt>"` — send a prompt to another node's Claude and read the reply
+- `fleet_list` — the nodes (the one marked `you_are_here` is this box)
+- `fleet_run` {node, cmd} — run a shell command on a node and read its output
+- `fleet_wake` {node} — wake a sleeping phone first if it shows asleep
+- `fleet_ask` {node, prompt} — hand a prompt to another node's Claude and read its reply
+- `fleet_sessions` {node} — that node's tmux sessions
 
-Also native MCP tools (fleet:*). Phone control is local-only by design: to drive a
-*different* phone, `fleet ask` its on-device Claude to run the `phone …` commands there.
+To drive a *different* phone's screen, `fleet_ask` its on-device Claude to run `phone …`
+there — phone control is local-only by design.
 GUIDE
 
 echo "BOOT: install phone MCP server for Claude"
