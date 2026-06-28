@@ -1132,6 +1132,17 @@ function noticeRow(text) {
   li.textContent = text;
   return li;
 }
+// A compact battery indicator for a phone peer (from its /api/health `power`).
+// ⚡ charging, 🔋 awake (CPU held), 💤 idle/sleeping (low drain). Tooltip carries the
+// duty cycle so "is this draining my battery?" is answerable at a glance.
+function batteryBadge(power) {
+  if (!power || typeof power.battery !== 'number' || power.battery < 0) return { text: '', title: '' };
+  const ic = power.charging ? '⚡' : (power.awake ? '🔋' : '💤');
+  return {
+    text: `  ${ic} ${power.battery}%`,
+    title: `${power.reason || ''} · CPU on ${power.dutyPct}% of last ${power.windowMin}m`,
+  };
+}
 
 async function openSwitcher() {
   switcherList.innerHTML = '';
@@ -1175,7 +1186,10 @@ async function loadPeerGroups() {
       continue;
     }
     // Peer "New" opens a fresh session on that machine via a #new deep link.
-    switcherList.append(groupHeader(p.name || p.dns, () => { location.href = p.url + '#new'; }));
+    const badge = batteryBadge(p.power);
+    const gh = groupHeader((p.name || p.dns) + badge.text, () => { location.href = p.url + '#new'; });
+    if (badge.title) gh.title = badge.title;
+    switcherList.append(gh);
     const loading = noticeRow('Loading…');
     switcherList.append(loading);
     fetchPeerSessions(p).then((sessions) => {

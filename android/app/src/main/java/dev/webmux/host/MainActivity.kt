@@ -5,6 +5,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
@@ -29,6 +31,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var updateBanner: Button
     private lateinit var checklist: LinearLayout
     private lateinit var hostInfo: TextView
+    private lateinit var powerView: TextView
+    private lateinit var saverBtn: Button
+    private lateinit var floorBtn: Button
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val powerRefresh = object : Runnable {
+        override fun run() { refreshPower(); uiHandler.postDelayed(this, 3000) }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +60,19 @@ class MainActivity : AppCompatActivity() {
             text = "Start / Join fleet"
             setOnClickListener { startHost() }
         })
+
+        root.addView(sectionLabel("Battery"))
+        powerView = TextView(this).apply { textSize = 14f; setPadding(0, 4, 0, 6) }
+        root.addView(powerView)
+        root.addView(TextView(this).apply {
+            text = "The phone only stays awake while in use; idle, it sleeps like normal. " +
+                "“CPU on X%” is how much of the last hour it was kept awake — small means tiny drain."
+            textSize = 12f; alpha = 0.6f; setPadding(0, 0, 0, 6)
+        })
+        saverBtn = controlRow { toggleSaver() }.also { root.addView(it) }
+        floorBtn = controlRow { cycleFloor() }.also { root.addView(it) }
+        root.addView(controlRow { sleepNow() }.apply { text = "Sleep now (release the CPU until I'm back)" })
+
         root.addView(sectionLabel("Setup"))
         checklist = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(checklist)
@@ -83,6 +105,12 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         refreshChecklist()
         refreshHostInfo()
+        uiHandler.post(powerRefresh) // live battery panel while the screen is open
+    }
+
+    override fun onPause() {
+        super.onPause()
+        uiHandler.removeCallbacks(powerRefresh)
     }
 
     /** Show the app version and the box's webmux version side by side — a lagging box
@@ -92,6 +120,52 @@ class MainActivity : AppCompatActivity() {
         val box = HostService.lastBoxVersion
         hostInfo.text = "App v$app" + (box?.let { " · box webmux $it" } ?: "")
     }
+
+    // --- battery panel ------------------------------------------------------
+
+    private fun controlRow(onClick: () -> Unit) = Button(this).apply {
+        setAllCaps(false); gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        setOnClickListener { onClick() }
+    }
+
+    private fun floorLabel(f: Int) = if (f <= 0) "off" else "$f%"
+
+    /** Live battery/power state — refreshed every few seconds while this screen is open. */
+    private fun refreshPower() {
+        val i = HostService.instance?.powerInfo()
+        if (i == null) {
+            powerView.text = "Host not running — tap “Start / Join fleet” above."
+            saverBtn.text = "Battery saver: ${if (savedSaver()) "ON" else "OFF"}"
+            floorBtn.text = "Sleep when battery below: ${floorLabel(savedFloor())}"
+            return
+        }
+        val bat = if (i.battery >= 0) "   ·   battery ${i.battery}%${if (i.charging) " (charging)" else ""}" else ""
+        powerView.text = "${if (i.awake) "● " else "💤 "}${i.reason}\n" +
+            "CPU kept on ${i.dutyPct}% of the last ${i.windowMin} min$bat"
+        saverBtn.text = "Battery saver: ${if (i.saver) "ON — sleep when idle" else "OFF — stay awake always"}"
+        floorBtn.text = "Sleep when battery below: ${floorLabel(i.floor)}"
+    }
+
+    private fun toggleSaver() {
+        val h = HostService.instance ?: return toast("Start the host first.")
+        h.setBatterySaver(!h.powerInfo().saver); refreshPower()
+    }
+
+    private fun cycleFloor() {
+        val h = HostService.instance ?: return toast("Start the host first.")
+        val next = when (h.powerInfo().floor) { 0 -> 20; 20 -> 40; else -> 0 }
+        h.setBatteryFloor(next); refreshPower()
+        toast(if (next == 0) "Battery floor off." else "Will sleep when below $next% (unless charging).")
+    }
+
+    private fun sleepNow() {
+        val h = HostService.instance ?: return toast("Start the host first.")
+        h.forceSleepNow(); refreshPower()
+        toast("Releasing the CPU — the phone can sleep now. It wakes when you return or on a remote wake.")
+    }
+
+    private fun savedSaver() = getSharedPreferences(HostService.PREFS, MODE_PRIVATE).getBoolean(HostService.KEY_SAVER, true)
+    private fun savedFloor() = getSharedPreferences(HostService.PREFS, MODE_PRIVATE).getInt(HostService.KEY_FLOOR, 0)
 
     // --- checklist ----------------------------------------------------------
 

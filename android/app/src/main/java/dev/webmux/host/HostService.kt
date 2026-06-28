@@ -26,6 +26,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  * proot/Debian userland (downloading it on first run) and — in later milestones —
  * launches webmux + Claude inside it, bound to the phone's Tailscale IP.
  */
+/** A snapshot of the host's power state for the app panel + notification. */
+class PowerInfo(
+    val awake: Boolean,     // is the CPU wake-lock currently held?
+    val reason: String,     // human-readable why (e.g. "Asleep — saving battery")
+    val dutyPct: Int,       // % of the window the wake-lock was held
+    val windowMin: Int,     // minutes the window spans
+    val battery: Int,       // battery % (-1 unknown)
+    val charging: Boolean,
+    val saver: Boolean,     // battery-saver policy on?
+    val floor: Int,         // sleep-below-% floor (0 = off)
+)
+
 class HostService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -55,8 +67,19 @@ class HostService : Service() {
     @Volatile private var charging = false
     @Volatile private var clientConnected = false
     @Volatile private var batterySaver = true
+    @Volatile private var batteryFloor = 0      // 0 = off; otherwise sleep on battery at/below this %
+    @Volatile private var forceSleep = false    // user tapped "Sleep now"; cleared on charge/screen-on
+    @Volatile private var powerReason = "starting…"
     private var graceUntil = 0L
     private var wakeUntil = 0L
+
+    // Wake-lock duty cycle over a rolling ~1h window — the honest "is it draining?" number.
+    // A PARTIAL_WAKE_LOCK only costs battery while held, so "% of the last hour awake" is
+    // what actually matters. Accounted lazily at every recompute and on read.
+    private var dutyHeld = false
+    private var dutyLastMs = 0L
+    private var dutyAwakeMs = 0L
+    private var dutyWindowStartMs = 0L
     private val powerHandler = Handler(Looper.getMainLooper())
     private val powerTick = Runnable { recomputeWakeLock() }
     private var powerReceiver: BroadcastReceiver? = null
@@ -224,9 +247,23 @@ class HostService : Service() {
         }
     }
 
+    @Volatile private var lastStatus = "Idle"
+
     private fun status(text: String) {
         Log.i(TAG, "status: $text")
+        lastStatus = text
         updateNotice(text)
+    }
+
+    /** Re-emit the notification with the same status but a fresh power line. */
+    private fun refreshNotice() = updateNotice(lastStatus)
+
+    /** One-line power summary shown in the notification's expanded view. */
+    private fun powerLine(): String {
+        val i = powerInfo()
+        val bat = if (i.battery >= 0) " · ${i.battery}%${if (i.charging) "⚡" else ""}" else ""
+        val head = if (i.awake) "● Awake" else "💤 Asleep"
+        return "$head · CPU on ${i.dutyPct}% of last ${i.windowMin}m$bat"
     }
 
     private fun goForeground(text: String) {
@@ -243,14 +280,17 @@ class HostService : Service() {
         }
     }
 
-    private fun notice(text: String): Notification =
-        NotificationCompat.Builder(this, CHANNEL)
+    private fun notice(text: String): Notification {
+        val power = runCatching { powerLine() }.getOrDefault("")
+        val body = if (power.isNotEmpty()) "$text\n$power" else text
+        return NotificationCompat.Builder(this, CHANNEL)
             .setContentTitle("WebMux Host")
-            .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentText(if (power.isNotEmpty()) power else text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
             .setOngoing(true)
             .build()
+    }
 
     private fun updateNotice(text: String) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -263,7 +303,10 @@ class HostService : Service() {
         wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "webmux:host")?.apply {
             setReferenceCounted(false)
         }
-        batterySaver = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_SAVER, true)
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).let {
+            batterySaver = it.getBoolean(KEY_SAVER, true)
+            batteryFloor = it.getInt(KEY_FLOOR, 0)
+        }
         screenOn = pm?.isInteractive ?: true
         charging = getSystemService(BatteryManager::class.java)?.isCharging ?: false
         powerReceiver = object : BroadcastReceiver() {
@@ -292,18 +335,76 @@ class HostService : Service() {
     private fun recomputeWakeLock() {
         val wl = wakeLock ?: return
         val now = SystemClock.elapsedRealtime()
+        settleDuty(now)
+        if (charging || screenOn) forceSleep = false // user's back / plugged in → cancel manual sleep
         val tempUntil = maxOf(graceUntil, wakeUntil) // grace after a session, or a wake-on-demand window
         val temp = now < tempUntil
-        val persistent = !batterySaver || charging || screenOn || clientConnected
+        val low = !charging && batteryFloor in 1..100 && batteryLevel().let { it in 1..batteryFloor }
+        val inUse = charging || screenOn || clientConnected
+        // Persistent hold = the policy keeps us awake. A manual "Sleep now" or a battery
+        // floor (when not charging and the screen's off) overrides it; the short temp
+        // window (reconnect/wake-on-demand) is always honoured so pushes still land.
+        val persistent = (!batterySaver || inUse) && !forceSleep && !(low && !screenOn)
         val shouldHold = persistent || temp
         if (shouldHold && !wl.isHeld) wl.acquire()
         else if (!shouldHold && wl.isHeld) wl.release()
+        dutyHeld = shouldHold
+        powerReason = describePower(shouldHold, temp, low)
         // If only a temporary window is keeping us awake, schedule a recheck at its end.
         powerHandler.removeCallbacks(powerTick)
         if (shouldHold && temp && !persistent) {
             powerHandler.postDelayed(powerTick, tempUntil - now + 50)
         }
+        refreshNotice() // keep the shade's awake/asleep + battery line current on transitions
     }
+
+    /** Attribute time-since-last to the awake total, keeping a rolling ~1h window. */
+    private fun settleDuty(now: Long) {
+        if (dutyLastMs == 0L) { dutyLastMs = now; dutyWindowStartMs = now; return }
+        if (dutyHeld) dutyAwakeMs += now - dutyLastMs
+        dutyLastMs = now
+        val elapsed = now - dutyWindowStartMs
+        if (elapsed > WINDOW_MS) { // decay so the % tracks the last ~hour, not all of history
+            dutyAwakeMs = (dutyAwakeMs * WINDOW_MS / elapsed)
+            dutyWindowStartMs = now - WINDOW_MS
+        }
+    }
+
+    private fun batteryLevel(): Int = runCatching {
+        getSystemService(BatteryManager::class.java)?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+    }.getOrDefault(-1)
+
+    private fun describePower(awake: Boolean, temp: Boolean, low: Boolean): String = when {
+        !awake && forceSleep -> "Asleep — you tapped Sleep now"
+        !awake && low -> "Asleep — battery below ${batteryFloor}%"
+        !awake -> "Asleep — saving battery"
+        charging -> "Awake — charging"
+        clientConnected -> "Awake — a session is open"
+        screenOn -> "Awake — screen on"
+        !batterySaver -> "Awake — battery saver is off"
+        temp -> "Awake — brief reconnect window"
+        else -> "Awake"
+    }
+
+    /** Snapshot for the app's battery panel and the notification. */
+    @Synchronized
+    fun powerInfo(): PowerInfo {
+        val now = SystemClock.elapsedRealtime()
+        settleDuty(now)
+        val win = (now - dutyWindowStartMs).coerceAtLeast(1)
+        val pct = (dutyAwakeMs * 100 / win).toInt().coerceIn(0, 100)
+        return PowerInfo(dutyHeld, powerReason, pct, (win / 60_000).toInt().coerceAtLeast(1),
+            batteryLevel(), charging, batterySaver, batteryFloor)
+    }
+
+    fun setBatteryFloor(pct: Int) {
+        batteryFloor = pct.coerceIn(0, 100)
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt(KEY_FLOOR, batteryFloor).apply()
+        recomputeWakeLock(); refreshNotice()
+    }
+
+    /** Release the wake-lock now and stay asleep until the user returns or plugs in. */
+    fun forceSleepNow() { forceSleep = true; recomputeWakeLock(); refreshNotice() }
 
     /** Open a window of wakefulness so webmux resumes + Tailscale reconnects after a wake push. */
     fun beginWakeWindow(ms: Long) {
@@ -321,7 +422,7 @@ class HostService : Service() {
     fun setBatterySaver(on: Boolean) {
         batterySaver = on
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_SAVER, on).apply()
-        recomputeWakeLock()
+        recomputeWakeLock(); refreshNotice()
     }
 
     override fun onDestroy() {
@@ -342,9 +443,11 @@ class HostService : Service() {
         const val EXTRA_WAKE = "wake"
         const val PREFS = "webmux"
         const val KEY_SAVER = "battery_saver"
+        const val KEY_FLOOR = "battery_floor"
         const val WAKE_INSTANCE = "webmux"
         private const val GRACE_MS = 60_000L
         private const val WAKE_WINDOW_MS = 120_000L
+        private const val WINDOW_MS = 3_600_000L // duty-cycle averaging window (~1h)
         private const val BOX_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000L // 6h between freshness checks
         private const val TAG = "webmuxhost"
 

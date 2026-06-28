@@ -29,10 +29,17 @@ class ControlServer(private val ctx: Context, port: Int = 8084) :
                     "\"keyboard\":${WebMuxIme.instance != null}}")
 
         // webmux pings this when its connected-client count crosses 0↔1 so the service
-        // can hold the wake-lock only while a session is live (battery policy).
+        // can hold the wake-lock only while a session is live (battery policy). It also
+        // GETs this to read the live power state for /api/health, so the fleet UI can
+        // show each phone's battery + sleep state from anywhere.
         if (s.uri == "/power") {
-            HostService.instance?.setClientConnected(p("busy") == "1")
-            return json(Response.Status.OK, "{\"ok\":true}")
+            p("busy")?.let { HostService.instance?.setClientConnected(it == "1") }
+            val i = HostService.instance?.powerInfo()
+                ?: return json(Response.Status.OK, "{\"ok\":true}")
+            return json(Response.Status.OK,
+                "{\"ok\":true,\"awake\":${i.awake},\"reason\":${q(i.reason)}," +
+                    "\"dutyPct\":${i.dutyPct},\"windowMin\":${i.windowMin},\"battery\":${i.battery}," +
+                    "\"charging\":${i.charging},\"saver\":${i.saver},\"floor\":${i.floor}}")
         }
 
         // webmux reads our UnifiedPush wake endpoint here to announce it to the fleet,

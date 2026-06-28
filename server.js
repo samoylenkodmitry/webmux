@@ -271,12 +271,12 @@ async function probeNodes(nodes) {
     if (n.dns) {
       const hc = httpsConn(n.ip, n.dns);
       const h = await probeWebmuxHealth(hc, 2500);
-      if (h) { const node = { name: n.name, dns: n.dns, ip: n.ip, url: hc.urlBase, conn: hc }; recordWakeEndpoint(node, h.wakeEndpoint); return node; }
+      if (h) { const node = { name: n.name, dns: n.dns, ip: n.ip, url: hc.urlBase, conn: hc, power: h.power || null }; recordWakeEndpoint(node, h.wakeEndpoint); return node; }
     }
     for (const port of PEER_HTTP_PORTS) {
       const pc = httpConn(n.ip, port);
       const h = await probeWebmuxHealth(pc, 1500);
-      if (h) { const node = { name: n.name, dns: n.dns || '', ip: n.ip, url: pc.urlBase, conn: pc }; recordWakeEndpoint(node, h.wakeEndpoint); return node; }
+      if (h) { const node = { name: n.name, dns: n.dns || '', ip: n.ip, url: pc.urlBase, conn: pc, power: h.power || null }; recordWakeEndpoint(node, h.wakeEndpoint); return node; }
     }
     return null;
   });
@@ -838,6 +838,8 @@ async function sendPush(payload) {
 const WAKE_REGISTRY_FILE = path.join(STATE_DIR, 'wake-registry.json');
 const wakeRegistry = new Map(); // dns||ip -> { name, dns, ip, endpoint, stamp }
 let _wakeEndpoint = ''; // this box's own endpoint (Android only)
+let _powerState = null; // last power snapshot from the host control API (Android only)
+let _powerStateAt = 0;
 const wakeKey = (n) => String(n.dns || n.ip || n.name || '').toLowerCase();
 
 async function loadWakeRegistry() {
@@ -869,6 +871,21 @@ function refreshWakeEndpoint() {
   const r = http.request({ host: '127.0.0.1', port: 8084, path: '/wake-endpoint', method: 'GET', timeout: 2000 }, (res) => {
     let b = ''; res.on('data', (c) => (b += c));
     res.on('end', () => { try { _wakeEndpoint = JSON.parse(b).endpoint || _wakeEndpoint; } catch { /* ignore */ } });
+  });
+  r.on('error', () => {});
+  r.end();
+}
+// On Android, read the host's live power/battery snapshot (loopback :8084). Cached and
+// refreshed lazily from /api/health so the fleet UI can show each phone's battery + sleep
+// state without the health call ever blocking on the loopback hop.
+function refreshPowerState() {
+  if (!IS_ANDROID) return;
+  const r = http.request({ host: '127.0.0.1', port: 8084, path: '/power', method: 'GET', timeout: 2000 }, (res) => {
+    let b = ''; res.on('data', (c) => (b += c));
+    res.on('end', () => {
+      try { const j = JSON.parse(b); if (j && typeof j.battery !== 'undefined') { _powerState = j; _powerStateAt = Date.now(); } }
+      catch { /* ignore */ }
+    });
   });
   r.on('error', () => {});
   r.end();
@@ -983,6 +1000,7 @@ const server = http.createServer(async (req, res) => {
     let tmuxState;
     try { tmuxState = { found: true, version: (await tmux(['-V'])).trim() }; }
     catch (e) { tmuxState = { found: false, error: e.message || String(e) }; }
+    if (IS_ANDROID && Date.now() - _powerStateAt > 4000) refreshPowerState(); // refresh lazily; serve cached
     return sendJson(res, 200, {
       ok: tmuxState.found,
       platform: process.platform,
@@ -992,6 +1010,7 @@ const server = http.createServer(async (req, res) => {
       version: await webmuxVersion(),
       android: IS_ANDROID, // a phone box vs a PC (both report platform "linux")
       wakeEndpoint: _wakeEndpoint, // UnifiedPush endpoint to wake this box (Android)
+      power: _powerState, // {awake,battery,charging,dutyPct,...} on Android, else null
       PATH: process.env.PATH,
     });
   }
