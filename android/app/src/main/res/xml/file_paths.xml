@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- The self-update APK is downloaded into cacheDir/update.apk. -->
+    <cache-path name="cache" path="." />
+</paths>

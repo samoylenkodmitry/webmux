@@ -65,6 +65,10 @@ class MainActivity : AppCompatActivity() {
                 status.text = "Re-running setup (updates webmux + MCP; keeps your rootfs + Claude login)…"
             }
         }
+        val updateApp = Button(this).apply {
+            text = "Update app (download from GitHub)"
+            setOnClickListener { updateApp() }
+        }
 
         val sv = ScrollView(this)
         root.addView(title)
@@ -73,6 +77,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(battery)
         root.addView(phoneControl)
         root.addView(repair)
+        root.addView(updateApp)
         root.addView(status)
         sv.addView(root)
         setContentView(sv)
@@ -111,6 +116,33 @@ class MainActivity : AppCompatActivity() {
         }
         status.text = "Host service started — see the notification."
     }
+
+    /** Check GitHub Releases for a newer APK of this app, download it, and install. */
+    private fun updateApp() {
+        val act = this
+        status.text = "Checking GitHub for a newer app…"
+        Thread {
+            val current = SelfUpdate.currentVersion(act)
+            val latest = SelfUpdate.latestVersion()
+            when {
+                latest == null -> { ui("Update check failed — no network or GitHub unreachable."); return@Thread }
+                !SelfUpdate.isNewer(latest, current) -> { ui("Already on the latest app (v$current)."); return@Thread }
+            }
+            val apk = try {
+                ui("New version v$latest — downloading…")
+                SelfUpdate.download(act) { p -> ui("Downloading v$latest…  $p%") }
+            } catch (e: Exception) { ui("Download failed: ${e.message}"); return@Thread }
+            if (!SelfUpdate.canInstall(act)) {
+                ui("Allow \"install unknown apps\" for WebMux Host, then tap Update app again.")
+                runOnUiThread { SelfUpdate.requestInstallPermission(act) }
+                return@Thread
+            }
+            ui("Opening installer for v$latest — tap Update to finish.")
+            runOnUiThread { SelfUpdate.installApk(act, apk) }
+        }.start()
+    }
+
+    private fun ui(msg: String) = runOnUiThread { status.text = msg }
 
     private fun maybeRequestNotifications() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
