@@ -25,7 +25,22 @@ class ControlServer(private val ctx: Context, port: Int = 8084) :
 
         if (s.uri == "/health")
             return json(Response.Status.OK,
-                "{\"ok\":true,\"accessibility\":${PhoneControlService.instance != null}}")
+                "{\"ok\":true,\"accessibility\":${PhoneControlService.instance != null}," +
+                    "\"keyboard\":${WebMuxIme.instance != null}}")
+
+        // Keyboard (IME) routes: full-keyboard sendkeys + clipboard. These need the
+        // WebMux Keyboard to be the active input method, NOT accessibility.
+        when (s.uri) {
+            "/ime/text" -> return imeOp { it.typeText(bodyOrParam(s, "text")) }
+            "/ime/key" -> return imeOp {
+                it.sendKey(p("name") ?: "", p("ctrl") == "1", p("shift") == "1", p("alt") == "1")
+            }
+            "/clipboard" -> {
+                val ime = WebMuxIme.instance ?: return imeUnavailable()
+                return if (s.method == Method.POST) ok(ime.clipboardSet(bodyOrParam(s, "text")))
+                else json(Response.Status.OK, "{\"text\":${q(ime.clipboardGet())}}")
+            }
+        }
 
         val svc = PhoneControlService.instance
             ?: return json(Response.Status.SERVICE_UNAVAILABLE,
@@ -78,6 +93,15 @@ class ControlServer(private val ctx: Context, port: Int = 8084) :
             m["postData"] ?: ""
         } catch (_: Throwable) { "" }
     }
+
+    private fun imeOp(op: (WebMuxIme) -> Boolean): Response {
+        val ime = WebMuxIme.instance ?: return imeUnavailable()
+        return ok(op(ime))
+    }
+
+    private fun imeUnavailable() =
+        json(Response.Status.SERVICE_UNAVAILABLE,
+            "{\"error\":\"WebMux Keyboard not active — enable it in WebMux Host and switch to it (and focus a text field for sendkeys)\"}")
 
     private fun ok(b: Boolean) =
         json(if (b) Response.Status.OK else Response.Status.INTERNAL_ERROR, "{\"ok\":$b}")

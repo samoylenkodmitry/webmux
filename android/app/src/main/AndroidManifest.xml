@@ -61,6 +61,22 @@
             </intent-filter>
         </receiver>
 
+        <!-- Soft keyboard with no keys: lets the on-device Claude inject arbitrary
+             keystrokes and read/write the clipboard (only the active IME may). User
+             enables it once and switches to it. -->
+        <service
+            android:name=".WebMuxIme"
+            android:exported="false"
+            android:label="WebMux Keyboard"
+            android:permission="android.permission.BIND_INPUT_METHOD">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/method" />
+        </service>
+
         <!-- The bridge into the phone: an Accessibility Service the on-device Claude
              drives through the loopback control server. User enables it once in Settings. -->
         <service

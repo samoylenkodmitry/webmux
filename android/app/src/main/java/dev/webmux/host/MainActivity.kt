@@ -8,6 +8,8 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
+import android.view.View
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -18,6 +20,7 @@ import androidx.core.content.ContextCompat
 class MainActivity : AppCompatActivity() {
 
     private lateinit var status: TextView
+    private lateinit var updateBanner: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -35,6 +38,11 @@ class MainActivity : AppCompatActivity() {
                 "webmux on your tailnet."
             textSize = 14f
             setPadding(0, 16, 0, 32)
+        }
+        // Shown only when a newer APK is published (checked on launch).
+        updateBanner = Button(this).apply {
+            visibility = View.GONE
+            setOnClickListener { updateApp() }
         }
         status = TextView(this).apply {
             text = "Idle."
@@ -69,18 +77,26 @@ class MainActivity : AppCompatActivity() {
             text = "Update app (download from GitHub)"
             setOnClickListener { updateApp() }
         }
+        val keyboard = Button(this).apply {
+            text = "Enable keyboard (sendkeys + clipboard)"
+            setOnClickListener { enableKeyboard() }
+        }
 
         val sv = ScrollView(this)
         root.addView(title)
         root.addView(subtitle)
+        root.addView(updateBanner)
         root.addView(start)
         root.addView(battery)
         root.addView(phoneControl)
+        root.addView(keyboard)
         root.addView(repair)
         root.addView(updateApp)
         root.addView(status)
         sv.addView(root)
         setContentView(sv)
+
+        checkForUpdateBanner()
 
         // Start the service while the app is unambiguously in the foreground, BEFORE
         // requesting notifications (whose system dialog would background us and make
@@ -143,6 +159,32 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ui(msg: String) = runOnUiThread { status.text = msg }
+
+    /** On launch, surface a one-tap banner if a newer APK is published. */
+    private fun checkForUpdateBanner() {
+        val act = this
+        Thread {
+            val current = SelfUpdate.currentVersion(act)
+            val latest = SelfUpdate.latestVersion() ?: return@Thread
+            if (SelfUpdate.isNewer(latest, current)) runOnUiThread {
+                updateBanner.text = "v$latest available — tap to update (you're on v$current)"
+                updateBanner.visibility = View.VISIBLE
+            }
+        }.start()
+    }
+
+    /** Enable + switch to the WebMux keyboard, which provides sendkeys + clipboard to Claude. */
+    private fun enableKeyboard() {
+        val imm = getSystemService(InputMethodManager::class.java)
+        val enabled = imm?.enabledInputMethodList?.any { it.packageName == packageName } == true
+        if (enabled) {
+            imm?.showInputMethodPicker()
+            status.text = "Pick \"WebMux Keyboard\" to make it active — then Claude can send keys + read/write the clipboard."
+        } else {
+            startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+            status.text = "Turn on \"WebMux Keyboard\", then tap this again to switch to it."
+        }
+    }
 
     private fun maybeRequestNotifications() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&

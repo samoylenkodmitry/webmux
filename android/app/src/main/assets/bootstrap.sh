@@ -71,10 +71,14 @@ case "$c" in
   swipe)  curl -fsS -X POST "$API/swipe?x1=$1&y1=$2&x2=$3&y2=$4&ms=${5:-300}"; echo ;;
   type)   curl -fsS -X POST "$API/text" --data-binary "${1:-}"; echo ;;
   key)    curl -fsS -X POST "$API/key?name=$1"; echo ;;
+  keys)   curl -fsS -X POST "$API/ime/text" --data-binary "${1:-}"; echo ;;
+  press)  n="$1"; shift 2>/dev/null || true; q="name=$n"; for m in "$@"; do q="$q&$m=1"; done; curl -fsS -X POST "$API/ime/key?$q"; echo ;;
+  clipget) curl -fsS "$API/clipboard"; echo ;;
+  clipset) curl -fsS -X POST "$API/clipboard" --data-binary "${1:-}"; echo ;;
   launch) curl -fsS -X POST "$API/launch?pkg=$1"; echo ;;
   apps)   curl -fsS "$API/apps"; echo ;;
   health) curl -fsS "$API/health"; echo ;;
-  *) echo "usage: phone {screenshot [file]|ui|tap X Y|swipe X1 Y1 X2 Y2 [ms]|type TEXT|key BACK|HOME|RECENTS|NOTIFICATIONS|launch PKG|apps|health}" ;;
+  *) echo "usage: phone {screenshot [file]|ui|tap X Y|swipe X1 Y1 X2 Y2 [ms]|type TEXT|key BACK|HOME|RECENTS|NOTIFICATIONS|keys TEXT|press KEY [ctrl] [shift] [alt]|clipget|clipset TEXT|launch PKG|apps|health}" ;;
 esac
 PHONE
 chmod +x /usr/local/bin/phone
@@ -88,13 +92,20 @@ phone with the `phone` command (it drives the app's accessibility service):
 - `phone ui` — JSON of on-screen elements: text, [left,top,right,bottom] bounds, tap/edit flags
 - `phone tap X Y` — tap a point (use the center of an element's bounds)
 - `phone swipe X1 Y1 X2 Y2 [ms]` — swipe / scroll
-- `phone type "text"` — type into the focused field
+- `phone type "text"` — set the focused field's text (accessibility; replaces it)
 - `phone key BACK|HOME|RECENTS|NOTIFICATIONS` — global buttons
 - `phone launch <package>` — open an app;  `phone apps` lists installed apps + packages
 
+Full keyboard + clipboard (via the WebMux Keyboard IME — needs it enabled + active):
+- `phone keys "text"` — type literal text at the cursor (inserts, unlike `type`)
+- `phone press ENTER` / `press TAB` / `press UP` / `press C ctrl` — a keystroke (+ modifiers)
+- `phone clipget` — read the clipboard;  `phone clipset "text"` — set it
+
 Loop: `phone ui` (or a screenshot) to see what's on screen → tap/type → re-check.
 If `phone health` shows accessibility:false, the user must enable "WebMux Host" in
-Android Settings → Accessibility. You also have these as native MCP tools (phone:*).
+Android Settings → Accessibility. If keyboard:false, the user must enable + switch to
+the "WebMux Keyboard" (open the WebMux Host app → Enable keyboard). You also have all
+of these as native MCP tools (phone:*).
 GUIDE
 
 echo "BOOT: install phone MCP server for Claude"
@@ -126,6 +137,10 @@ const TOOLS = [
   { name: 'key', description: 'Press a global button: BACK, HOME, RECENTS, NOTIFICATIONS.', inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
   { name: 'launch', description: 'Launch an app by package name.', inputSchema: { type: 'object', properties: { pkg: { type: 'string' } }, required: ['pkg'] } },
   { name: 'apps', description: 'List installed apps + package names.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'sendkeys', description: 'Type literal text at the cursor via the WebMux keyboard (inserts, unlike type which replaces). Needs the WebMux Keyboard enabled + active and a focused field.', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
+  { name: 'press', description: 'Press a keyboard key with optional modifiers. key: ENTER, TAB, ESC, UP/DOWN/LEFT/RIGHT, BACKSPACE, DELETE, HOME, END, PAGEUP, PAGEDOWN, or a single char. e.g. {key:"C",ctrl:true}. Needs WebMux Keyboard active + a focused field.', inputSchema: { type: 'object', properties: { key: { type: 'string' }, ctrl: { type: 'boolean' }, shift: { type: 'boolean' }, alt: { type: 'boolean' } }, required: ['key'] } },
+  { name: 'clipboard_get', description: 'Read the phone clipboard text. Needs the WebMux Keyboard active.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'clipboard_set', description: 'Set the phone clipboard text. Needs the WebMux Keyboard active.', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
 ];
 async function run(name, a = {}) {
   if (name === 'screenshot') { const r = await call('/screenshot'); return r.status === 200 ? { content: [{ type: 'image', data: r.buf.toString('base64'), mimeType: 'image/png' }] } : T('screenshot failed (needs Android 11+ and accessibility enabled)'); }
@@ -136,6 +151,10 @@ async function run(name, a = {}) {
   if (name === 'type') { await call('/text', 'POST', String(a.text || '')); return T('typed'); }
   if (name === 'key') { await call(`/key?name=${encodeURIComponent(a.name)}`, 'POST'); return T(`key ${a.name}`); }
   if (name === 'launch') { await call(`/launch?pkg=${encodeURIComponent(a.pkg)}`, 'POST'); return T(`launched ${a.pkg}`); }
+  if (name === 'sendkeys') { const r = await call('/ime/text', 'POST', String(a.text || '')); return T(r.status === 200 ? 'sent' : (r.buf.toString() || 'keyboard not active')); }
+  if (name === 'press') { const q = `name=${encodeURIComponent(a.key)}&ctrl=${a.ctrl ? 1 : 0}&shift=${a.shift ? 1 : 0}&alt=${a.alt ? 1 : 0}`; const r = await call('/ime/key?' + q, 'POST'); return T(r.status === 200 ? `pressed ${a.key}` : (r.buf.toString() || 'keyboard not active')); }
+  if (name === 'clipboard_get') { const r = await call('/clipboard'); try { return T(JSON.parse(r.buf.toString()).text || ''); } catch { return T(r.buf.toString() || 'keyboard not active'); } }
+  if (name === 'clipboard_set') { const r = await call('/clipboard', 'POST', String(a.text || '')); return T(r.status === 200 ? 'clipboard set' : (r.buf.toString() || 'keyboard not active')); }
   return T('unknown tool ' + name);
 }
 function send(o) { process.stdout.write(JSON.stringify(o) + '\n'); }
