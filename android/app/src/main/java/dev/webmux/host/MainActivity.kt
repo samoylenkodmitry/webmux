@@ -1,9 +1,6 @@
 package dev.webmux.host
 
 import android.Manifest
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -14,11 +11,9 @@ import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import org.unifiedpush.android.connector.UnifiedPush
@@ -133,43 +128,32 @@ class MainActivity : AppCompatActivity() {
 
     private fun setUpWake() {
         if (!Setup.ntfyInstalled(this)) {
-            status.text = "Installing the ntfy push app first…"; installNtfy(); return
+            status.text = "Installing the wake app (ntfy)…"
+            installNtfy()
+            toast("When ntfy finishes installing, tap “Remote wake” again.")
+            return
         }
-        val url = Setup.ntfyServerUrl(this)
-        if (url.isBlank()) { promptNtfyUrl(); return }
-        // If we've already registered once, this is a no-op refresh — just re-register.
-        if (Setup.wakeRegistered(this)) {
-            registerWake(); status.text = "Remote wake is on (refreshed)."; return
-        }
-        // ntfy's default server can't be set by another app (no API/deep-link), so copy
-        // it and walk the user there. One paste, then they tap Remote wake again.
-        copyToClipboard(url)
+        // One tap: register for push wake using the ntfy app's push server as-is. No URL
+        // to type, no ntfy settings to change — the wake endpoint comes back to us
+        // automatically and we confirm below.
+        status.text = "Turning on remote wake…"
         registerWake()
-        launchNtfy()
-        status.text = "Server URL copied. In ntfy → ⋮ → Settings → Default server → paste \"$url\" → SAVE, then come back and tap Remote wake again."
-        toast("Copied $url — paste it in ntfy → Settings → Default server")
+        val act = this
+        Thread {
+            var ok = false
+            for (n in 0 until 24) { Thread.sleep(500); if (Setup.wakeRegistered(act)) { ok = true; break } }
+            runOnUiThread {
+                refreshChecklist()
+                status.text = if (ok)
+                    "✓ Remote wake is ON — the fleet can wake this phone when it's asleep."
+                else
+                    "Couldn't turn on remote wake. Open the ntfy app once so it's running, make sure ntfy + WebMux Host are allowed to run in the background (the auto-start step above), then tap Remote wake again."
+            }
+        }.start()
     }
 
     private fun toast(msg: String) =
         android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show()
-
-    private fun promptNtfyUrl() {
-        val input = EditText(this).apply {
-            hint = "http://<your-ntfy-host>:2586"
-            setText(Setup.ntfyServerUrl(this@MainActivity))
-            setPadding(48, 24, 48, 24)
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Push server (ntfy) URL")
-            .setMessage("The self-hosted ntfy that wakes your phones (the box you ran orangepi-ntfy.sh on).")
-            .setView(input)
-            .setPositiveButton("Save") { _, _ ->
-                Setup.setNtfyServerUrl(this, input.text.toString())
-                if (Setup.ntfyServerUrl(this).isNotBlank()) setUpWake()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
 
     private fun registerWake() {
         val act = this
@@ -195,11 +179,6 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun launchNtfy() {
-        packageManager.getLaunchIntentForPackage(Setup.NTFY_PKG)
-            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)?.let { startActivity(it) }
-    }
-
     private fun openOemAutostart() {
         val i = Setup.oemAutostartIntent(this)
         if (i != null) {
@@ -209,11 +188,6 @@ class MainActivity : AppCompatActivity() {
             startActivity(Setup.appDetailsIntent(this))
             status.text = "Allow background activity / auto-launch for WebMux Host here."
         }
-    }
-
-    private fun copyToClipboard(s: String) {
-        (getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager)
-            ?.setPrimaryClip(ClipData.newPlainText("ntfy server", s))
     }
 
     // --- keyboard / battery / notifications ---------------------------------
