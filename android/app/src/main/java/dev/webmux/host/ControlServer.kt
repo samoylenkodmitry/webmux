@@ -42,6 +42,14 @@ class ControlServer(private val ctx: Context, port: Int = 8084) :
                     "\"charging\":${i.charging},\"saver\":${i.saver},\"floor\":${i.floor}}")
         }
 
+        // webmux POSTs this from its /api/sleep button to force the host to sleep now:
+        // release the wake-lock (and tear the box down if on-demand is on). webmux has
+        // already closed every terminal by the time it calls this.
+        if (s.uri == "/sleep") {
+            HostService.instance?.forceSleepNow()
+            return json(Response.Status.OK, "{\"ok\":true}")
+        }
+
         // webmux reads our UnifiedPush wake endpoint here to announce it to the fleet,
         // so any box can POST it to wake this phone when it's asleep.
         if (s.uri == "/wake-endpoint") {

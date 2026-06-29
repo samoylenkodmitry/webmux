@@ -1115,16 +1115,33 @@ function groupHeader(text, onNew) {
   const li = document.createElement('li');
   li.className = 'switcher-group';
   const label = document.createElement('span');
+  label.className = 'group-label';
   label.textContent = text;
   li.append(label);
   if (onNew) {
+    const acts = document.createElement('span');
+    acts.className = 'group-actions';
     const btn = document.createElement('button');
     btn.className = 'btn group-new';
     btn.textContent = '＋ New';
     btn.addEventListener('click', (e) => { e.stopPropagation(); onNew(); });
-    li.append(btn);
+    acts.append(btn);
+    li.append(acts);
   }
   return li;
+}
+// Inject a "💤 Sleep" button into a group header (left of ＋New). For Android phones:
+// closes all their terminals and puts the host to sleep. `onSleep(btn)` does the work.
+function addSleepButton(headerEl, onSleep) {
+  let acts = headerEl.querySelector('.group-actions');
+  if (!acts) { acts = document.createElement('span'); acts.className = 'group-actions'; headerEl.append(acts); }
+  if (acts.querySelector('.group-sleep')) return;
+  const sb = document.createElement('button');
+  sb.className = 'btn group-sleep';
+  sb.textContent = '💤 Sleep';
+  sb.title = 'Close all terminals and put this phone to sleep';
+  sb.addEventListener('click', (e) => { e.stopPropagation(); onSleep(sb); });
+  acts.insertBefore(sb, acts.firstChild);
 }
 function noticeRow(text) {
   const li = document.createElement('li');
@@ -1148,7 +1165,15 @@ async function openSwitcher() {
   switcherList.innerHTML = '';
   switcherEl.hidden = false;
   // 1) This machine's sessions render immediately (fast path).
-  switcherList.append(groupHeader('This PC', () => switchSession('new')));
+  const localHeader = groupHeader('This PC', () => switchSession('new'));
+  switcherList.append(localHeader);
+  // If this box is itself a phone host, offer to sleep it too (closes its terminals,
+  // releases the wake-lock). Async so the fast session render isn't blocked on /api/health.
+  fetch('/api/health', { cache: 'no-store' }).then((r) => r.json()).then((j) => {
+    if (j && j.android && !switcherEl.hidden && localHeader.isConnected) {
+      addSleepButton(localHeader, (btn) => sleepLocal(localHeader, btn));
+    }
+  }).catch(() => {});
   const localLoading = noticeRow('Loading…');
   switcherList.append(localLoading);
   let sessions = [];
@@ -1189,6 +1214,8 @@ async function loadPeerGroups() {
     const badge = batteryBadge(p.power);
     const gh = groupHeader((p.name || p.dns) + badge.text, () => { location.href = p.url + '#new'; });
     if (badge.title) gh.title = badge.title;
+    // Only phone hosts report a `power` block — give them a "close all & sleep" button.
+    if (p.power) addSleepButton(gh, (btn) => sleepPeer(p, gh, btn));
     switcherList.append(gh);
     const loading = noticeRow('Loading…');
     switcherList.append(loading);
@@ -1221,6 +1248,47 @@ async function wakeThenGo(peer, hash, setLabel) {
     say(`Waking ${who}… (${Math.ceil((deadline - Date.now()) / 1000)}s)`);
   }
   say(`💤 ${who} didn't wake — tap to retry (is it charging / remote wake on?)`);
+}
+
+// Flip a phone's group header to an "asleep" look once it has been put to sleep.
+function markHeaderAsleep(headerEl, peer, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '💤 Asleep'; }
+  const label = headerEl && headerEl.querySelector('.group-label');
+  if (label && peer) label.textContent = (peer.name || peer.dns) + '  💤';
+}
+
+// Close every terminal on a phone peer and put its host to sleep (proxied via this box).
+async function sleepPeer(peer, headerEl, btn) {
+  const who = peer.name || peer.dns || 'this phone';
+  const ok = await askConfirm({
+    title: 'Sleep phone',
+    message: `Close all terminals on ${who} and put it to sleep? Any open sessions there will end.`,
+    okLabel: 'Close all & sleep', danger: true,
+  });
+  if (!ok) return;
+  btn.disabled = true; btn.textContent = '💤 …';
+  let done = false;
+  try {
+    const res = await fetch(`/api/peer/sleep?dns=${encodeURIComponent(peer.dns)}&ip=${encodeURIComponent(peer.ip)}`, { method: 'POST' });
+    const j = await res.json().catch(() => ({}));
+    done = res.ok && j && j.ok;
+  } catch { /* network */ }
+  if (done) markHeaderAsleep(headerEl, peer, btn);
+  else { btn.disabled = false; btn.textContent = '💤 Sleep'; }
+}
+
+// Close every terminal on THIS phone box and sleep it. This severs our own connection,
+// so the result is best-effort UI feedback — the WS drops as the sessions die.
+async function sleepLocal(headerEl, btn) {
+  const ok = await askConfirm({
+    title: 'Sleep this phone',
+    message: 'Close all terminals on this phone and put it to sleep? This ends every session here and disconnects you.',
+    okLabel: 'Close all & sleep', danger: true,
+  });
+  if (!ok) return;
+  btn.disabled = true; btn.textContent = '💤 …';
+  try { await fetch('/api/sleep', { method: 'POST' }); } catch { /* may be torn down mid-request */ }
+  markHeaderAsleep(headerEl, null, btn);
 }
 
 async function fetchPeerSessions(peer) {

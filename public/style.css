@@ -393,12 +393,16 @@ html, body {
   z-index: 1;
 }
 .switcher-group:first-child { padding-top: 2px; }
-.switcher-group .group-new {
+.switcher-group .group-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.switcher-group .group-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.switcher-group .group-new,
+.switcher-group .group-sleep {
   flex: none;
   font-size: 12px; font-weight: 600;
   padding: 5px 12px; min-height: 30px;
   text-transform: none; letter-spacing: 0;
 }
+.switcher-group .group-sleep:disabled { opacity: 0.6; }
 
 .menu-row { display: flex; align-items: center; gap: 8px; }
 .menu-label { flex: 1; color: var(--muted); }

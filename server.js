@@ -908,6 +908,20 @@ function refreshPowerState() {
   r.on('error', () => {});
   r.end();
 }
+// On Android, ask the WebMux Host (loopback :8084) to release the wake-lock and sleep
+// now (it respects on-demand: tears the box fully down if on-demand is enabled). The
+// terminals are already closed by the caller. Best-effort; resolves bool.
+function sleepHost() {
+  return new Promise((resolve) => {
+    if (!IS_ANDROID) return resolve(false);
+    const r = http.request({ host: '127.0.0.1', port: 8084, path: '/sleep', method: 'POST', timeout: 2000 }, (res) => {
+      res.resume(); resolve(res.statusCode >= 200 && res.statusCode < 300);
+    });
+    r.on('error', () => resolve(false));
+    r.on('timeout', () => { r.destroy(); resolve(false); });
+    r.end();
+  });
+}
 // POST to a UnifiedPush endpoint URL to wake the phone. Best-effort; resolves bool.
 function sendWake(endpoint) {
   return new Promise((resolve) => {
@@ -1100,6 +1114,20 @@ const server = http.createServer(async (req, res) => {
     const r = await postPeerJson(match.conn, '/api/broadcast', { cmd }, 24000);
     const one = r && Array.isArray(r.results) && r.results[0];
     return sendJson(res, 200, { result: one || { host: match.name, ok: false, output: 'unreachable or too old' } });
+  }
+  if (url.pathname === '/api/peer/sleep') {
+    // Put a peer phone to sleep (close its terminals + release its host wake-lock):
+    // this box → that peer's /api/sleep. Same peer-allowlist guard as the other proxies.
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+    if (!TAILSCALE_ENABLED) return sendJson(res, 200, { ok: false });
+    const dns = url.searchParams.get('dns') || '';
+    const ip = url.searchParams.get('ip') || '';
+    const peers = await tailscalePeers();
+    const match = peers.find((p) => p.dns === dns && p.ip === ip) ||
+      peers.find((p) => ip && p.ip === ip) || peers.find((p) => dns && p.dns === dns);
+    if (!match) return sendJson(res, 404, { error: 'unknown peer' });
+    const r = await postPeerJson(match.conn, '/api/sleep', {}, 6000);
+    return sendJson(res, 200, r || { ok: false, error: 'unreachable or too old' });
   }
   if (url.pathname === '/api/peer/sessions') {
     // Proxy a peer's session list so the picker can group sessions by machine
@@ -1309,6 +1337,17 @@ const server = http.createServer(async (req, res) => {
     } catch {
       return sendJson(res, 404, { error: 'kill failed' });
     }
+  }
+  if (url.pathname === '/api/sleep') {
+    // Force-close every terminal on this box and put the host to sleep. Android-only:
+    // refuse on a PC so a stray request can never kill a desktop's tmux server. Kills
+    // the whole tmux server (on a phone box every session is webmux's), then pokes the
+    // WebMux Host to release the wake-lock / tear the box down per the on-demand setting.
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+    if (!IS_ANDROID) return sendJson(res, 400, { error: 'sleep is android-only' });
+    try { await tmux(['kill-server']); } catch { /* no server running = nothing to close */ }
+    const slept = await sleepHost();
+    return sendJson(res, 200, { ok: true, slept });
   }
   if (url.pathname === '/api/windows') {
     const name = url.searchParams.get('name') || '';

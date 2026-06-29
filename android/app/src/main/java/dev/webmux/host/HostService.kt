@@ -364,7 +364,10 @@ class HostService : Service() {
         val now = SystemClock.elapsedRealtime()
         settleDuty(now)
         if (charging || screenOn) forceSleep = false // user's back / plugged in → cancel manual sleep
-        val tempUntil = maxOf(graceUntil, wakeUntil) // grace after a session, or a wake-on-demand window
+        // grace after a session, or a wake-on-demand window. A manual "Sleep now"
+        // (forceSleep) skips the reconnect grace so it sleeps at once, but still honours
+        // an active wake-on-demand window so a push can always land and resume.
+        val tempUntil = maxOf(if (forceSleep) 0L else graceUntil, wakeUntil)
         val temp = now < tempUntil
         val low = !charging && batteryFloor in 1..100 && batteryLevel().let { it in 1..batteryFloor }
         val inUse = charging || screenOn || clientConnected
