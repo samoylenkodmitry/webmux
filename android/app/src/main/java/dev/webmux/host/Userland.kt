@@ -304,12 +304,21 @@ class Userland(private val ctx: Context) {
     }
 
     companion object {
-        /** The phone's Tailscale IP (CGNAT 100.64.0.0/10) from the tun interface, or null. */
+        /**
+         * The phone's Tailscale IP (CGNAT 100.64.0.0/10), or null. SECURITY: only accept
+         * the 100.64/10 address from a **tunnel** interface (Tailscale runs as an Android
+         * VpnService → a `tun*` iface). webmux has no auth and binds exactly this address,
+         * so it must never be a WiFi/cellular IP: some networks (carrier-grade NAT) hand
+         * clients a 100.64/10 address, and without this filter — with Tailscale off — webmux
+         * would bind that public-facing IP and expose an unauthenticated shell to the LAN.
+         * Restricting to `tun*` means "bound = on the tailnet" always holds.
+         */
         fun findTailnetIp(): String? {
             return try {
-                java.net.NetworkInterface.getNetworkInterfaces().toList().flatMap {
-                    it.inetAddresses.toList()
-                }.filterIsInstance<java.net.Inet4Address>().map { it.hostAddress ?: "" }
+                java.net.NetworkInterface.getNetworkInterfaces().toList()
+                    .filter { it.name.startsWith("tun") }
+                    .flatMap { it.inetAddresses.toList() }
+                    .filterIsInstance<java.net.Inet4Address>().map { it.hostAddress ?: "" }
                     .firstOrNull { ip ->
                         val o = ip.split(".").mapNotNull { it.toIntOrNull() }
                         o.size == 4 && o[0] == 100 && o[1] in 64..127
