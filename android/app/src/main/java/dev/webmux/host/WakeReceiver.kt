@@ -20,9 +20,11 @@ class WakeReceiver : MessagingReceiver() {
 
     override fun onNewEndpoint(context: Context, endpoint: PushEndpoint, instance: String) {
         Log.i(TAG, "wake endpoint registered: ${endpoint.url}")
-        context.getSharedPreferences(HostService.PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY_ENDPOINT, endpoint.url).apply()
-        ensureService(context, wake = false)
+        val prefs = context.getSharedPreferences(HostService.PREFS, Context.MODE_PRIVATE)
+        prefs.edit().putString(KEY_ENDPOINT, endpoint.url).apply()
+        // On-demand: just record the endpoint; don't fire the box up for a registration —
+        // only a real wake push (onMessage) counts as a demand.
+        if (!prefs.getBoolean(HostService.KEY_ONDEMAND, false)) ensureService(context, wake = false)
     }
 
     override fun onMessage(context: Context, message: PushMessage, instance: String) {

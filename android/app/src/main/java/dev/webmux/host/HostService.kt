@@ -36,6 +36,8 @@ class PowerInfo(
     val charging: Boolean,
     val saver: Boolean,     // battery-saver policy on?
     val floor: Int,         // sleep-below-% floor (0 = off)
+    val onDemand: Boolean,  // tear the box down when idle?
+    val dormant: Boolean,   // box currently torn down, waiting for a demand?
 )
 
 class HostService : Service() {
@@ -69,6 +71,13 @@ class HostService : Service() {
     @Volatile private var batterySaver = true
     @Volatile private var batteryFloor = 0      // 0 = off; otherwise sleep on battery at/below this %
     @Volatile private var forceSleep = false    // user tapped "Sleep now"; cleared on charge/screen-on
+    // On-demand: when no terminal is connected (past the grace/wake window), tear the box
+    // fully down — kill node/tmux/proot, free the RAM, stop every periodic wakeup — and
+    // leave only this featherweight foreground service as the push listener that fires the
+    // box back up on demand. Truly absent when idle; reachable only via a wake (or opening
+    // the app), so it's gated on remote-wake being set up.
+    @Volatile private var onDemand = false
+    @Volatile private var dormant = false       // box torn down, waiting for a demand
     @Volatile private var powerReason = "starting…"
     private var graceUntil = 0L
     private var wakeUntil = 0L
@@ -110,6 +119,9 @@ class HostService : Service() {
         if (intent?.hasExtra(EXTRA_SET_SAVER) == true) {
             setBatterySaver(intent.getBooleanExtra(EXTRA_SET_SAVER, true))
         }
+        if (intent?.hasExtra(EXTRA_SET_ONDEMAND) == true) {
+            setOnDemand(intent.getBooleanExtra(EXTRA_SET_ONDEMAND, false))
+        }
         if (intent?.getBooleanExtra(EXTRA_WAKE, false) == true) {
             status("Woken on demand — coming online…"); beginWakeWindow(WAKE_WINDOW_MS)
         }
@@ -117,6 +129,10 @@ class HostService : Service() {
         if (intent?.getBooleanExtra(EXTRA_REINSTALL, false) == true) pendingReinstall = true
         if (intent?.getBooleanExtra(EXTRA_REBOOTSTRAP, false) == true) pendingRebootstrap = true
         if (working.compareAndSet(false, true)) {
+            dormant = false
+            // In on-demand, give a window to connect after a (re)start so it doesn't
+            // instantly tear back down before the client/agent reaches it.
+            if (onDemand) beginWakeWindow(WAKE_WINDOW_MS)
             Thread { supervise(url) }.start()
         } else if (pendingReinstall || pendingRebootstrap) {
             // Supervisor already running: bounce webmux so the loop re-pulls on fresh
@@ -177,6 +193,12 @@ class HostService : Service() {
                 catch (_: Throwable) { /* stream closed by a bounce — fall through */ }
                 val rc = proc.waitFor()
                 webmuxProc = null
+                if (dormant) { // on-demand teardown: box is dead — drop the service entirely
+                    working.set(false)
+                    Log.i(TAG, "on-demand: box torn down, going dormant")
+                    powerHandler.post { stopDormant() }
+                    break
+                }
                 val why = if (pendingRebootstrap || pendingReinstall) "applying update" else "rc=$rc"
                 status("webmux stopped ($why) — restarting…")
                 Thread.sleep(2000)
@@ -262,6 +284,7 @@ class HostService : Service() {
     private fun powerLine(): String {
         val i = powerInfo()
         val bat = if (i.battery >= 0) " · ${i.battery}%${if (i.charging) "⚡" else ""}" else ""
+        if (i.dormant) return "💤 Dormant — box off, wakes on demand$bat"
         val head = if (i.awake) "● Awake" else "💤 Asleep"
         return "$head · CPU on ${i.dutyPct}% of last ${i.windowMin}m$bat"
     }
@@ -306,6 +329,7 @@ class HostService : Service() {
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).let {
             batterySaver = it.getBoolean(KEY_SAVER, true)
             batteryFloor = it.getInt(KEY_FLOOR, 0)
+            onDemand = it.getBoolean(KEY_ONDEMAND, false)
         }
         screenOn = pm?.isInteractive ?: true
         charging = getSystemService(BatteryManager::class.java)?.isCharging ?: false
@@ -356,6 +380,39 @@ class HostService : Service() {
             powerHandler.postDelayed(powerTick, tempUntil - now + 50)
         }
         refreshNotice() // keep the shade's awake/asleep + battery line current on transitions
+        // On-demand: the moment we'd otherwise idle (no terminal, windows elapsed), tear
+        // the box fully down instead of just releasing the wake-lock.
+        if (onDemand && !shouldHold && webmuxProc != null && !dormant) goDormant()
+    }
+
+    /** On-demand teardown: kill the box (node/tmux/proot). The supervisor sees `dormant`
+     *  after node exits and tears the whole service down via stopDormant(). */
+    private fun goDormant() {
+        dormant = true
+        status("💤 No terminal — shutting the box down…")
+        Thread { runCatching { userland.stopWebmux() } }.start()
+    }
+
+    /** Fully release the service so the process can be reclaimed: nothing of the box
+     *  remains, the phone deep-sleeps, and only the UnifiedPush receiver (the ntfy app +
+     *  WakeReceiver) stays able to fire it back up on demand. */
+    private fun stopDormant() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(Service.STOP_FOREGROUND_REMOVE)
+        else @Suppress("DEPRECATION") stopForeground(true)
+        stopSelf()
+    }
+
+    /** Toggle on-demand teardown. Turning it off while dormant brings the box back up. */
+    fun setOnDemand(on: Boolean) {
+        onDemand = on
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ONDEMAND, on).apply()
+        if (!on && dormant && working.compareAndSet(false, true)) {
+            dormant = false
+            Thread { supervise(Userland.DEFAULT_ROOTFS_URL) }.start()
+        } else {
+            recomputeWakeLock()
+        }
+        refreshNotice()
     }
 
     /** Attribute time-since-last to the awake total, keeping a rolling ~1h window. */
@@ -375,6 +432,7 @@ class HostService : Service() {
     }.getOrDefault(-1)
 
     private fun describePower(awake: Boolean, temp: Boolean, low: Boolean): String = when {
+        dormant -> "Dormant — box off, wakes on demand"
         !awake && forceSleep -> "Asleep — you tapped Sleep now"
         !awake && low -> "Asleep — battery below ${batteryFloor}%"
         !awake -> "Asleep — saving battery"
@@ -394,7 +452,7 @@ class HostService : Service() {
         val win = (now - dutyWindowStartMs).coerceAtLeast(1)
         val pct = (dutyAwakeMs * 100 / win).toInt().coerceIn(0, 100)
         return PowerInfo(dutyHeld, powerReason, pct, (win / 60_000).toInt().coerceAtLeast(1),
-            batteryLevel(), charging, batterySaver, batteryFloor)
+            batteryLevel(), charging, batterySaver, batteryFloor, onDemand, dormant)
     }
 
     fun setBatteryFloor(pct: Int) {
@@ -440,10 +498,12 @@ class HostService : Service() {
         const val EXTRA_REINSTALL = "reinstall"
         const val EXTRA_REBOOTSTRAP = "rebootstrap"
         const val EXTRA_SET_SAVER = "set_saver"
+        const val EXTRA_SET_ONDEMAND = "set_ondemand"
         const val EXTRA_WAKE = "wake"
         const val PREFS = "webmux"
         const val KEY_SAVER = "battery_saver"
         const val KEY_FLOOR = "battery_floor"
+        const val KEY_ONDEMAND = "on_demand"
         const val WAKE_INSTANCE = "webmux"
         private const val GRACE_MS = 60_000L
         private const val WAKE_WINDOW_MS = 120_000L

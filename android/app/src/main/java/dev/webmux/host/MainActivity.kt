@@ -34,6 +34,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var powerView: TextView
     private lateinit var saverBtn: Button
     private lateinit var floorBtn: Button
+    private lateinit var ondemandBtn: Button
     private val uiHandler = Handler(Looper.getMainLooper())
     private val powerRefresh = object : Runnable {
         override fun run() { refreshPower(); uiHandler.postDelayed(this, 3000) }
@@ -69,6 +70,7 @@ class MainActivity : AppCompatActivity() {
                 "“CPU on X%” is how much of the last hour it was kept awake — small means tiny drain."
             textSize = 12f; alpha = 0.6f; setPadding(0, 0, 0, 6)
         })
+        ondemandBtn = controlRow { toggleOnDemand() }.also { root.addView(it) }
         saverBtn = controlRow { toggleSaver() }.also { root.addView(it) }
         floorBtn = controlRow { cycleFloor() }.also { root.addView(it) }
         root.addView(controlRow { sleepNow() }.apply { text = "Sleep now (release the CPU until I'm back)" })
@@ -134,16 +136,34 @@ class MainActivity : AppCompatActivity() {
     private fun refreshPower() {
         val i = HostService.instance?.powerInfo()
         if (i == null) {
-            powerView.text = "Host not running — tap “Start / Join fleet” above."
+            // Service gone. In on-demand that's the normal dormant state, not a crash.
+            powerView.text = if (savedOnDemand())
+                "💤 Dormant — box off, wakes on demand.\nTap “Start / Join fleet” to bring it up now."
+            else "Host not running — tap “Start / Join fleet” above."
+            ondemandBtn.text = "On-demand: ${if (savedOnDemand()) "ON — fully off when idle" else "OFF — stays ready"}"
             saverBtn.text = "Battery saver: ${if (savedSaver()) "ON" else "OFF"}"
             floorBtn.text = "Sleep when battery below: ${floorLabel(savedFloor())}"
             return
         }
         val bat = if (i.battery >= 0) "   ·   battery ${i.battery}%${if (i.charging) " (charging)" else ""}" else ""
-        powerView.text = "${if (i.awake) "● " else "💤 "}${i.reason}\n" +
-            "CPU kept on ${i.dutyPct}% of the last ${i.windowMin} min$bat"
+        powerView.text = if (i.dormant)
+            "💤 Dormant — box off, wakes on demand$bat"
+        else "${if (i.awake) "● " else "💤 "}${i.reason}\nCPU kept on ${i.dutyPct}% of the last ${i.windowMin} min$bat"
+        ondemandBtn.text = "On-demand: ${if (i.onDemand) "ON — box dies when no terminal" else "OFF — stays ready"}"
         saverBtn.text = "Battery saver: ${if (i.saver) "ON — sleep when idle" else "OFF — stay awake always"}"
         floorBtn.text = "Sleep when battery below: ${floorLabel(i.floor)}"
+    }
+
+    private fun toggleOnDemand() {
+        val cur = HostService.instance?.powerInfo()?.onDemand ?: savedOnDemand()
+        val on = !cur
+        if (on && !Setup.wakeRegistered(this))
+            toast("Tip: turn on Remote wake first, or you'll have to open this app to bring it back.")
+        val h = HostService.instance
+        if (h != null) h.setOnDemand(on)
+        else getSharedPreferences(HostService.PREFS, MODE_PRIVATE).edit().putBoolean(HostService.KEY_ONDEMAND, on).apply()
+        refreshPower()
+        if (on) toast("On-demand: the box shuts down when no terminal is connected, and fires up on a wake.")
     }
 
     private fun toggleSaver() {
@@ -166,6 +186,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun savedSaver() = getSharedPreferences(HostService.PREFS, MODE_PRIVATE).getBoolean(HostService.KEY_SAVER, true)
     private fun savedFloor() = getSharedPreferences(HostService.PREFS, MODE_PRIVATE).getInt(HostService.KEY_FLOOR, 0)
+    private fun savedOnDemand() = getSharedPreferences(HostService.PREFS, MODE_PRIVATE).getBoolean(HostService.KEY_ONDEMAND, false)
 
     // --- checklist ----------------------------------------------------------
 
