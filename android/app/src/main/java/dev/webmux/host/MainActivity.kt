@@ -98,9 +98,27 @@ class MainActivity : AppCompatActivity() {
 
         val sv = ScrollView(this); sv.addView(root); setContentView(sv)
 
-        if (intent?.getBooleanExtra("autostart", false) == true) startHost()
+        handleDeepLink(intent)
         ensureNotificationPermission()
         checkForUpdateBanner()
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleDeepLink(intent) // process autostart / set_ondemand even when already foreground
+    }
+
+    /** Deep-link extras: autostart the host, and flip on-demand (a script/the fleet can set
+     *  it this way; the service intent can't be shell-started on modern Android). */
+    private fun handleDeepLink(intent: Intent?) {
+        if (intent?.getBooleanExtra("autostart", false) == true) startHost()
+        if (intent?.hasExtra(HostService.EXTRA_SET_ONDEMAND) == true) {
+            val on = intent.getBooleanExtra(HostService.EXTRA_SET_ONDEMAND, false)
+            HostService.instance?.setOnDemand(on)
+                ?: getSharedPreferences(HostService.PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(HostService.KEY_ONDEMAND, on).apply()
+        }
     }
 
     override fun onResume() {
