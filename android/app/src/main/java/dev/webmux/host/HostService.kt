@@ -181,6 +181,9 @@ class HostService : Service() {
                 val proc = userland.startWebmux(ip)
                 webmuxProc = proc
                 fleetUrl = "http://$ip:8083"
+                // On-demand: give a full connect window from the moment webmux is actually
+                // reachable (a slow cold bootstrap can outlast the window opened at start).
+                if (onDemand && !clientConnected) beginWakeWindow(WAKE_WINDOW_MS)
                 status(fleetText())
                 // Heal a stale box: pull webmux forward (the app self-updates, the box
                 // doesn't). Runs in the background so bring-up isn't blocked on the fetch.
