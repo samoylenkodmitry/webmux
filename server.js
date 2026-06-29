@@ -139,6 +139,24 @@ function clientTailnetIp(req) {
   return isTailnetIp(ip) ? ip : null;
 }
 
+// Defense-in-depth, zero user friction: even though the listener is bound to the tun
+// interface, also reject any connection whose SOURCE isn't the tailnet (CGNAT 100.64/10
+// or Tailscale's IPv6 ULA fd7a:115c:a1e0::/48) or on-device loopback. So if a bind ever
+// lands on a hostile network (Tailscale off + a carrier-grade-NAT WiFi, a future bug),
+// webmux — which has no auth — still serves nobody. Enforced on phones, where access is
+// strictly tailnet/loopback; a PC may be reached over its LAN, so opt out with
+// WEBMUX_TRUST_LAN=1. This can't isolate other devices already on your tailnet (that
+// needs a secret you'd have to hold) — it closes the off-tailnet-exposure hole only.
+function remoteOnTailnet(req) {
+  let ip = (req.socket && req.socket.remoteAddress) || '';
+  if (ip.startsWith('::ffff:')) ip = ip.slice(7);
+  if (ip === '127.0.0.1' || ip === '::1') return true;            // loopback (on-device, tailscale serve)
+  if (isTailnetIp(ip)) return true;                               // 100.64.0.0/10
+  if (ip.toLowerCase().startsWith('fd7a:115c:a1e0')) return true; // Tailscale IPv6 ULA
+  return false;
+}
+const ENFORCE_TAILNET = IS_ANDROID && process.env.WEBMUX_TRUST_LAN !== '1';
+
 // One request to a peer over its conn. Resolves { status, body } or null on a
 // connection error / timeout. Body is capped.
 function peerHttp(conn, { method = 'GET', path = '/', body = null, timeoutMs = 4000, maxBytes = 1_000_000 } = {}) {
@@ -987,6 +1005,10 @@ async function serveStatic(req, res, url) {
 }
 
 const server = http.createServer(async (req, res) => {
+  if (ENFORCE_TAILNET && !remoteOnTailnet(req)) { // reject non-tailnet sources (see remoteOnTailnet)
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
+    return res.end('forbidden: tailnet only\n');
+  }
   // Learn peers from whoever probes us (the X-Webmux-Self tag identifies a webmux
   // prober and carries its tailnet name). Lets a node with no `tailscale status`
   // discover the fleet for free.
@@ -1366,6 +1388,7 @@ function clampInt(v, def, min, max) {
 }
 
 server.on('upgrade', (req, socket, head) => {
+  if (ENFORCE_TAILNET && !remoteOnTailnet(req)) { socket.destroy(); return; } // tailnet-only (see remoteOnTailnet)
   const url = new URL(req.url, 'http://localhost');
   const parts = url.pathname.split('/').filter(Boolean); // e.g. ['ws','session','name']
   let mode = null;
